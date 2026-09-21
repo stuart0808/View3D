@@ -18,6 +18,8 @@ import { laneLayout, ELEVATED_H } from './roads.js'
 const MIN_ROAD_WIDTH = 5.5 // 比这窄的路不走车
 const CAR_LEN = 4.3
 const V_MAX = 7.5, V_TURN = 4, V_LOT = 2.8, V_RAMP = 5.5, ACCEL = 2.5, BRAKE = 6
+const RAMP_W = 4.4
+const MERGE_LEN = 22 // 匝道到桥面标高后，并入/驶出主线的平段长度
 const RAMP_LENS = [75, 60, 48] // 匝道水平长度（米），路段放得下就用长的；真实匝道更长，示例街区小，48m 时坡度约 13%
 
 export class Traffic {
@@ -127,7 +129,7 @@ export class Traffic {
       const found = { on: null, off: null }
       for (const sw of this.ways) {
         if (sw.level || sw.roundabout || sw.n < 2) continue
-        const k = sw.lanes.findIndex((l) => l.off > deckHalf + 1.0)
+        const k = sw.lanes.findIndex((l) => l.off - RAMP_W / 2 > deckHalf - 0.15) // 匝道全宽都要在桥面外侧，否则爬升段会和主桥穿模
         if (k < 0 || (sw.reserved !== undefined && sw.reserved !== k)) continue
         const sl = sw.lanes[k]
         for (const type of ['on', 'off']) for (const RAMP_LEN of RAMP_LENS) {
@@ -140,6 +142,7 @@ export class Traffic {
             const a = sl.sample(s0), b = sl.sample(s0 + RAMP_LEN)
             const ha = projectOnPolyline(eLane.pts, eLane.cum, a.x, a.y), hb = projectOnPolyline(eLane.pts, eLane.cum, b.x, b.y)
             if (ha.dist > deckHalf + 9 || hb.dist > deckHalf + 9 || hb.s - ha.s < RAMP_LEN * 0.8) continue // 要在桥的正侧下方、且同向
+            if (type === 'on' ? hb.s + MERGE_LEN > eLane.len - 8 : ha.s - MERGE_LEN < 8) continue // 桥上还要留出并线平段
             if (ha.s < 10 || hb.s > eLane.len - 10) continue
             const low = type === 'on' ? [s0 - 6, s0 + RAMP_LEN * 0.55] : [s0 + RAMP_LEN * 0.45, s0 + RAMP_LEN + 6]
             if (sl.crosswalks.some((c) => c.s > low[0] && c.s < low[1])) continue
@@ -151,18 +154,31 @@ export class Traffic {
         }
       }
       // 同一方向上: 先上桥、后下桥，两者不能重叠
-      if (found.on && found.off && found.off.es0 < found.on.es1 + 15) found.off = null
+      if (found.on && found.off && found.off.es0 - MERGE_LEN < found.on.es1 + MERGE_LEN + 10) found.off = null
       for (const r of [found.on, found.off]) {
         if (!r) continue
         r.sLane.way.reserved = r.sLane.k
-        const smooth = (t) => t * t * t * (t * (6 * t - 15) + 10)
-        r.pts = []
-        for (let i = 0; i <= 18; i++) {
-          const t = i / 18, w = smooth(t)
-          const A = r.eLane.sample(r.es0 + (r.es1 - r.es0) * t), B = r.sLane.sample(r.ss0 + r.rlen * t)
-          const k = r.type === 'on' ? w : 1 - w // 在桥上的比例
-          r.pts.push([B.x + (A.x - B.x) * k, B.y + (A.y - B.y) * k, ELEVATED_H * k])
+        // 走法和真匝道一样: 坡段全程贴在桥面外侧、正好在地面匝道车道的上方（不和主桥重叠）；
+        // 到了桥面标高，再用一段平的并线段横移进/出主线最外侧车道。pts: [x, y, 高度, 是否并线段]
+        const smooth = (t) => t * t * (3 - 2 * t)
+        const slope = [], merge = []
+        for (let i = 0; i <= 14; i++) {
+          const t = i / 14, B = r.sLane.sample(r.ss0 + r.rlen * t)
+          slope.push([B.x, B.y, ELEVATED_H * smooth(r.type === 'on' ? t : 1 - t), 0])
         }
+        const top = r.type === 'on' ? slope[slope.length - 1] : slope[0] // 坡顶
+        const eTop = r.eLane.sample(r.type === 'on' ? r.es1 : r.es0)
+        const dX = top[0] - eTop.x, dY = top[1] - eTop.y // 坡顶相对主线车道的横向偏移
+        for (let i = 0; i <= 8; i++) {
+          const u = i / 8
+          const es = r.type === 'on' ? r.es1 + MERGE_LEN * u : r.es0 - MERGE_LEN * (1 - u)
+          const A = r.eLane.sample(es), k = r.type === 'on' ? 1 - smooth(u) : smooth(u)
+          merge.push([A.x + dX * k, A.y + dY * k, ELEVATED_H, 1])
+        }
+        r.pts = r.type === 'on' ? [...slope, ...merge.slice(1)] : [...merge, ...slope.slice(1)]
+        r.eFrom = r.es0 - MERGE_LEN // 下桥: 车在主线上的这个位置开始驶出
+        r.eTo = r.es1 + MERGE_LEN   // 上桥: 车在主线上的这个位置完成汇入
+        r.gap = merge.map((q) => [q[0], q[1]]) // 主桥护栏在这一段要留缺口
         r.cum = cumulative(r.pts)
         r.len = r.cum[r.cum.length - 1]
         r.cars = []
@@ -182,7 +198,7 @@ export class Traffic {
       let sincePier = 0
       for (let i = 0; i + 1 < r.pts.length; i++) {
         const a = r.pts[i], b = r.pts[i + 1]
-        const hm = (a[2] + b[2]) / 2
+        const hm = (a[2] + b[2]) / 2 - 0.03 // 比主桥面低一点点，和桥面重叠的部分被桥面盖住，不会闪烁
         if (hm < 0.12) continue // 已经贴地的那一小段不用画
         dir.set(b[0] - a[0], b[2] - a[2], b[1] - a[1])
         const L = dir.length()
@@ -191,10 +207,15 @@ export class Traffic {
         right.crossVectors(dir, worldUp).normalize()
         upv.crossVectors(right, dir)
         m.makeBasis(dir, upv, right).setPosition((a[0] + b[0]) / 2, hm - 0.28, (a[1] + b[1]) / 2)
-        boxes.push(new THREE.BoxGeometry(L + 0.15, 0.5, 4.4).applyMatrix4(m))
+        boxes.push(new THREE.BoxGeometry(L + 0.15, 0.5, RAMP_W).applyMatrix4(m))
+        // 哪一侧朝着主桥: 看主线车道在匝道的左边还是右边（局部 +Z = 行进方向的右侧）
+        const e = r.eLane.sample(projectOnPolyline(r.eLane.pts, r.eLane.cum, a[0], a[1]).s)
+        const bridgeSide = (e.x - a[0]) * right.x + (e.y - a[1]) * right.z > 0 ? 1 : -1
         for (const sgn of [-1, 1]) {
+          // 朝桥的一侧: 并线段不设护栏（车要横移过去）；坡段接近桥面标高时主桥自己的护栏已经在那儿了
+          if (sgn === bridgeSide && (b[3] || a[3] || hm > ELEVATED_H - 0.9)) continue
           const g = new THREE.BoxGeometry(L + 0.15, 0.9, 0.22)
-          g.translate(0, 0.7, sgn * 2.1)
+          g.translate(0, 0.7, sgn * (RAMP_W / 2 - 0.1))
           rails.push(g.applyMatrix4(m))
         }
         sincePier += L
@@ -395,7 +416,7 @@ export class Traffic {
   }
 
   #enterLane(car, lane, nextWay, s = 0, ramp = null) {
-    car.takeRamp = ramp || (lane.offRamp && lane.offRamp.es0 > s + 5 && this.rand() < 0.45 ? lane.offRamp : null)
+    car.takeRamp = ramp || (lane.offRamp && lane.offRamp.eFrom > s + 5 && this.rand() < 0.45 ? lane.offRamp : null)
     car.h = undefined
     car.mode = 'lane'
     car.move = this.#moveOf(lane.way, nextWay)
@@ -505,7 +526,7 @@ export class Traffic {
     let vmax = car.vmax
     if (car.takeRamp) {
       const r = car.takeRamp
-      const d = (r.type === 'on' ? r.ss0 : r.es0) - car.s
+      const d = (r.type === 'on' ? r.ss0 : r.eFrom) - car.s
       if (d < 20) vmax = Math.min(vmax, V_RAMP)
       if (d <= 0) {
         lane.cars.splice(lane.cars.indexOf(car), 1)
@@ -620,7 +641,7 @@ export class Traffic {
   #updateRamp(car, dt) {
     const { r } = car.ramp
     const target = r.type === 'on' ? r.eLane : r.sLane
-    const sT = r.type === 'on' ? r.es1 : r.ss0 + r.rlen
+    const sT = r.type === 'on' ? r.eTo : r.ss0 + r.rlen
     let gap = Infinity
     const idx = r.cars.indexOf(car)
     if (idx > 0) gap = r.cars[idx - 1].ramp.s - car.ramp.s - CAR_LEN - 2.5 // 先上匝道的排在前面

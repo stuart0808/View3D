@@ -1,12 +1,12 @@
 // 地块底座、路面、人行铺装、车道线/斑马线，以及四周雾化的背景楼块。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
-import { makeShape, toGround, offsetPolygon } from './geometry.js'
+import { makeShape, toGround, signedArea, edgeNormal } from './geometry.js'
 import { laneLayout, hasMedian, ELEVATED_H } from './roads.js'
 
 export const CURB_H = 0.18
 
-export function buildGround(scene, style, parkingLines = []) {
+export function buildGround(scene, style, parkingLines = [], railGaps = []) {
   const group = new THREE.Group()
   group.name = 'ground'
   const std = (color, rough = 0.95) => new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0 })
@@ -40,7 +40,7 @@ export function buildGround(scene, style, parkingLines = []) {
 
   group.add(buildAreas(scene, style))
   group.add(buildMarkings(scene, style, parkingLines))
-  group.add(buildElevated(scene, style))
+  group.add(buildElevated(scene, style, railGaps))
 
   // 接住底座影子的透明地面
   const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(6000, 6000), new THREE.ShadowMaterial({ opacity: 0.13 }))
@@ -187,15 +187,43 @@ function buildMarkings(scene, style, parkingLines) {
   return group
 }
 
+function distToPolyline(x, y, pts) {
+  let best = Infinity
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const a = pts[i], b = pts[i + 1]
+    const dx = b[0] - a[0], dy = b[1] - a[1]
+    const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1)))
+    best = Math.min(best, Math.hypot(x - a[0] - dx * t, y - a[1] - dy * t))
+  }
+  return best
+}
+
 /** 高架: 桥面板 + 两侧护栏 + 桥墩。车和标线由别处抬到 ELEVATED_H */
-export function buildElevated(scene, style) {
+export function buildElevated(scene, style, railGaps = []) {
   const group = new THREE.Group()
   group.name = 'elevated'
   const decks = [], rails = [], piers = []
   for (const e of scene.elevated || []) {
     decks.push(toGround(new THREE.ExtrudeGeometry(makeShape(e.polygon, e.holes), { depth: 0.9, bevelEnabled: false }), ELEVATED_H - 0.9))
-    const inner = offsetPolygon(e.polygon, -0.45)
-    if (inner) rails.push(toGround(new THREE.ExtrudeGeometry(makeShape(e.polygon, [inner]), { depth: 1.0, bevelEnabled: false }), ELEVATED_H))
+    // 护栏沿桥面轮廓一小段一小段地摆，匝道并线的地方（railGaps）跳过，车才不是「穿过护栏」上桥的
+    const ring = e.polygon, area = signedArea(ring)
+    for (let i = 0; i < ring.length; i++) {
+      const p = ring[i], q = ring[(i + 1) % ring.length]
+      const L = Math.hypot(q[0] - p[0], q[1] - p[1])
+      if (L < 0.3) continue
+      const tx = (q[0] - p[0]) / L, ty = (q[1] - p[1]) / L
+      const [ox, oy] = edgeNormal(ring, i, area)
+      const n = Math.max(1, Math.round(L / 3))
+      for (let k = 0; k < n; k++) {
+        const s = (L * (k + 0.5)) / n
+        const cx = p[0] + tx * s - ox * 0.22, cy = p[1] + ty * s - oy * 0.22
+        if (railGaps.some((g) => distToPolyline(cx, cy, g) < 3.4)) continue
+        const b = new THREE.BoxGeometry(L / n + 0.05, 1.0, 0.44)
+        b.rotateY(Math.atan2(-ty, tx))
+        b.translate(cx, ELEVATED_H + 0.5, cy)
+        rails.push(b)
+      }
+    }
   }
   for (const lane of scene.lanes || []) {
     if (!lane.level) continue

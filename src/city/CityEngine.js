@@ -95,7 +95,7 @@ export class CityEngine {
     this.signals = this.options.signals !== false ? new Signals(sceneData, rand) : null
     // 车流要先建: 停车位线是它排的，地面标线要用
     if (this.options.traffic !== false) this.traffic = new Traffic(sceneData, this.nav, rand, { signals: this.signals })
-    world.add(buildGround(sceneData, this.style, this.traffic?.parkingLines || []))
+    world.add(buildGround(sceneData, this.style, this.traffic?.parkingLines || [], (this.traffic?.ramps || []).map((r) => r.gap)))
     world.add(buildBackdrop(sceneData, this.style, rand))
     const { group, heatGeometry } = buildBuildings(sceneData, this.nav, rand, this.style)
     world.add(group)
