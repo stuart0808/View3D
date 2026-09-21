@@ -1,6 +1,6 @@
 // 道路的公共规则。地面标线（ground.js）和车流（traffic.js）都从这里取，保证车走在线里。
 
-export const ELEVATED_H = 7.5 // 高架桥面标高（米）
+export const ELEVATED_H = 6.5 // 高架桥面标高（米）
 
 /**
  * 路宽 → 车道划分。

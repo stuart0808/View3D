@@ -4,18 +4,21 @@
 //   · 通行规则参照《道路交通安全法》第47条、《实施条例》第38/51/52条:
 //       导向车道: 左转走最内侧、右转走最外侧、直行走中间；红灯可右转（先停、确认不妨碍行人和被放行车辆），不可左转/直行；
 //       转弯让直行和行人；进环岛让环内车；行经人行横道遇行人停车让行
-//   · 环岛: 环内逆时针单行，不设灯；高架: 独立一层，不与地面路网相交
+//   · 环岛: 环内逆时针单行，不设灯；高架: 独立一层，不与地面路网相交，靠自动生成的上/下匝道和桥下的主干路连通
+//     （高架两端通到图外，所以匝道给地面路网带来了净流入和净流出）
 //   · 停车场和带地下车库的楼: 车会从最外侧车道拐进去停下/消失，也会定时有车开出来汇入车流
 import * as THREE from 'three'
 import { carGeometry, carMaterial, CAR_COLORS, layoutParking } from './props.js'
 import { SURFACE } from './navgrid.js'
 import { signedArea } from './geometry.js'
 import { CURB_H } from './ground.js'
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { laneLayout, ELEVATED_H } from './roads.js'
 
 const MIN_ROAD_WIDTH = 5.5 // 比这窄的路不走车
 const CAR_LEN = 4.3
-const V_MAX = 7.5, V_TURN = 4, V_LOT = 2.8, ACCEL = 2.5, BRAKE = 6
+const V_MAX = 7.5, V_TURN = 4, V_LOT = 2.8, V_RAMP = 5.5, ACCEL = 2.5, BRAKE = 6
+const RAMP_LENS = [75, 60, 48] // 匝道水平长度（米），路段放得下就用长的；真实匝道更长，示例街区小，48m 时坡度约 13%
 
 export class Traffic {
   constructor(scene, nav, rand, { density = 1 / 110, capacity = 1500, signals = null } = {}) {
@@ -29,6 +32,7 @@ export class Traffic {
     this.decor = new THREE.Group()
     this.decor.name = 'trafficDecor'
     this.#buildWays(scene)
+    this.#buildRamps()
     this.#buildFacilities(scene)
 
     this.mesh = new THREE.InstancedMesh(carGeometry(), carMaterial(), capacity)
@@ -63,7 +67,7 @@ export class Traffic {
         for (let k = 0; k < n; k++) {
           const lane = this.#makeLane(pts, offsets[k], this.nodes[from], this.nodes[to], way.roundabout)
           if (!lane) break
-          Object.assign(lane, { way, k, cars: [], crosswalks: [], gates: [] })
+          Object.assign(lane, { way, k, off: offsets[k], cars: [], crosswalks: [], gates: [], onRamp: null, offRamp: null })
           lane.sample = (s) => samplePolyline(lane.pts, lane.cum, s, {})
           way.lanes.push(lane)
         }
@@ -110,6 +114,110 @@ export class Traffic {
     return { pts, cum, len: cum[cum.length - 1] }
   }
 
+  /**
+   * 高架匝道。对高架的每个行驶方向:
+   *   在它正下方、同向的地面路里找「紧贴桥面外侧的那条车道」，整条留作匝道车道（别的车不走，否则会从匝道里穿过去）；
+   *   靠前的一段放上桥匝道，靠后的一段放下桥匝道。匝道低的那一半避开斑马线。
+   */
+  #buildRamps() {
+    this.ramps = []
+    for (const ew of this.ways.filter((w) => w.level)) {
+      const eLane = ew.lanes[ew.n - 1]
+      const deckHalf = ew.edge.width / 2
+      const found = { on: null, off: null }
+      for (const sw of this.ways) {
+        if (sw.level || sw.roundabout || sw.n < 2) continue
+        const k = sw.lanes.findIndex((l) => l.off > deckHalf + 1.0)
+        if (k < 0 || (sw.reserved !== undefined && sw.reserved !== k)) continue
+        const sl = sw.lanes[k]
+        for (const type of ['on', 'off']) for (const RAMP_LEN of RAMP_LENS) {
+          if (sl.len < RAMP_LEN + 28) continue
+          // 上桥匝道尽量靠路段前部，下桥匝道尽量靠后部
+          const starts = []
+          for (let s0 = 12; s0 + RAMP_LEN <= sl.len - 16; s0 += 4) starts.push(s0)
+          if (type === 'off') starts.reverse()
+          for (const s0 of starts) {
+            const a = sl.sample(s0), b = sl.sample(s0 + RAMP_LEN)
+            const ha = projectOnPolyline(eLane.pts, eLane.cum, a.x, a.y), hb = projectOnPolyline(eLane.pts, eLane.cum, b.x, b.y)
+            if (ha.dist > deckHalf + 9 || hb.dist > deckHalf + 9 || hb.s - ha.s < RAMP_LEN * 0.8) continue // 要在桥的正侧下方、且同向
+            if (ha.s < 10 || hb.s > eLane.len - 10) continue
+            const low = type === 'on' ? [s0 - 6, s0 + RAMP_LEN * 0.55] : [s0 + RAMP_LEN * 0.45, s0 + RAMP_LEN + 6]
+            if (sl.crosswalks.some((c) => c.s > low[0] && c.s < low[1])) continue
+            const better = !found[type] || (type === 'on' ? ha.s < found[type].es0 : ha.s > found[type].es0)
+            if (better) found[type] = { type, eLane, sLane: sl, ss0: s0, es0: ha.s, es1: hb.s, rlen: RAMP_LEN }
+            break
+          }
+          if (found[type]?.sLane === sl) break // 这条路上已经用较长的长度放下了，不再试更短的
+        }
+      }
+      // 同一方向上: 先上桥、后下桥，两者不能重叠
+      if (found.on && found.off && found.off.es0 < found.on.es1 + 15) found.off = null
+      for (const r of [found.on, found.off]) {
+        if (!r) continue
+        r.sLane.way.reserved = r.sLane.k
+        const smooth = (t) => t * t * t * (t * (6 * t - 15) + 10)
+        r.pts = []
+        for (let i = 0; i <= 18; i++) {
+          const t = i / 18, w = smooth(t)
+          const A = r.eLane.sample(r.es0 + (r.es1 - r.es0) * t), B = r.sLane.sample(r.ss0 + r.rlen * t)
+          const k = r.type === 'on' ? w : 1 - w // 在桥上的比例
+          r.pts.push([B.x + (A.x - B.x) * k, B.y + (A.y - B.y) * k, ELEVATED_H * k])
+        }
+        r.cum = cumulative(r.pts)
+        r.len = r.cum[r.cum.length - 1]
+        r.cars = []
+        if (r.type === 'on') r.sLane.onRamp = r
+        else r.eLane.offRamp = r
+        this.ramps.push(r)
+      }
+    }
+    this.#buildRampMeshes()
+  }
+
+  #buildRampMeshes() {
+    if (!this.ramps.length) return
+    const boxes = [], rails = [], piers = []
+    const dir = new THREE.Vector3(), right = new THREE.Vector3(), upv = new THREE.Vector3(), worldUp = new THREE.Vector3(0, 1, 0), m = new THREE.Matrix4()
+    for (const r of this.ramps) {
+      let sincePier = 0
+      for (let i = 0; i + 1 < r.pts.length; i++) {
+        const a = r.pts[i], b = r.pts[i + 1]
+        const hm = (a[2] + b[2]) / 2
+        if (hm < 0.12) continue // 已经贴地的那一小段不用画
+        dir.set(b[0] - a[0], b[2] - a[2], b[1] - a[1])
+        const L = dir.length()
+        // 显式构造基: X 沿坡面前进方向，Z 水平向右，Y 垂直坡面。用「两向量间最短旋转」会带上滚转，桥面就拧了
+        dir.normalize()
+        right.crossVectors(dir, worldUp).normalize()
+        upv.crossVectors(right, dir)
+        m.makeBasis(dir, upv, right).setPosition((a[0] + b[0]) / 2, hm - 0.28, (a[1] + b[1]) / 2)
+        boxes.push(new THREE.BoxGeometry(L + 0.15, 0.5, 4.4).applyMatrix4(m))
+        for (const sgn of [-1, 1]) {
+          const g = new THREE.BoxGeometry(L + 0.15, 0.9, 0.22)
+          g.translate(0, 0.7, sgn * 2.1)
+          rails.push(g.applyMatrix4(m))
+        }
+        sincePier += L
+        if (hm > 2.2 && hm < ELEVATED_H - 0.6 && sincePier > 14) {
+          sincePier = 0
+          const pg = new THREE.BoxGeometry(1.0, hm - 0.5, 1.6)
+          pg.rotateY(Math.atan2(-(b[1] - a[1]), b[0] - a[0]))
+          pg.translate((a[0] + b[0]) / 2, (hm - 0.5) / 2, (a[1] + b[1]) / 2)
+          piers.push(pg)
+        }
+      }
+    }
+    const add = (geos, color) => {
+      if (!geos.length) return
+      const mesh = new THREE.Mesh(mergeGeometries(geos.map((g) => { g.deleteAttribute('uv'); return g.toNonIndexed() })), new THREE.MeshStandardMaterial({ color, roughness: 0.9 }))
+      mesh.castShadow = mesh.receiveShadow = true
+      this.decor.add(mesh)
+    }
+    add(boxes, '#666a72')
+    add(rails, '#eef0f2')
+    add(piers, '#c4c8ce')
+  }
+
   /** 给红绿灯用: 每个有灯路口的每个进口道，灯杆位置 + 停车线 */
   signalSites() {
     const sites = []
@@ -138,7 +246,7 @@ export class Traffic {
     const findGate = (cx, cy, maxDist) => {
       let best = null
       for (const lane of outerLanes) {
-        if (lane.len < 40 || lane.way.level || lane.way.roundabout) continue
+        if (lane.len < 40 || lane.way.level || lane.way.roundabout || lane.way.reserved === lane.k) continue
         const hit = projectOnPolyline(lane.pts, lane.cum, cx, cy)
         const s = Math.min(lane.len - 20, Math.max(14, hit.s))
         const p = lane.sample(s)
@@ -277,10 +385,18 @@ export class Traffic {
       else if (move === 'R') k = n - 1
       else if (n >= 3) k = 1 + ((this.rand() * (n - 2)) | 0)
     } else if (way.roundabout && n > 1) k = move === 'R' ? n - 1 : 0 // 环内: 下个口出环走外圈，继续绕走内圈
+    // 这条路上有匝道车道: 要上桥的车走它，其余的车让开
+    if (way.reserved !== undefined) {
+      const ramp = way.lanes[way.reserved].onRamp
+      if (ramp && this.rand() < 0.3) return { lane: way.lanes[way.reserved], nextWay, move, ramp }
+      if (k === way.reserved) k = k > 0 ? k - 1 : k + 1
+    }
     return { lane: way.lanes[k], nextWay, move }
   }
 
-  #enterLane(car, lane, nextWay, s = 0) {
+  #enterLane(car, lane, nextWay, s = 0, ramp = null) {
+    car.takeRamp = ramp || (lane.offRamp && lane.offRamp.es0 > s + 5 && this.rand() < 0.45 ? lane.offRamp : null)
+    car.h = undefined
     car.mode = 'lane'
     car.move = this.#moveOf(lane.way, nextWay)
     car.rtor = false
@@ -323,14 +439,14 @@ export class Traffic {
       if (plan.lane.cars.some((c) => Math.abs(c.s - s) < 12)) continue
       const car = this.#newCar()
       car.v = V_MAX * 0.6
-      this.#enterLane(car, plan.lane, plan.nextWay, s)
+      this.#enterLane(car, plan.lane, plan.nextWay, s, plan.ramp && plan.ramp.ss0 > s + 5 ? plan.ramp : null)
       n++
     }
   }
 
   get roadCount() {
     let n = 0
-    for (const c of this.cars) if (c.mode === 'lane' || c.mode === 'turn') n++
+    for (const c of this.cars) if (c.mode === 'lane' || c.mode === 'turn' || c.mode === 'ramp') n++
     return n
   }
 
@@ -344,7 +460,7 @@ export class Traffic {
       if (onWay < (plan.lane.len / 45) * plan.lane.way.n && !plan.lane.cars.some((c) => c.s < 14)) {
         const car = this.#newCar()
         car.v = V_MAX * 0.6
-        this.#enterLane(car, plan.lane, plan.nextWay, 0)
+        this.#enterLane(car, plan.lane, plan.nextWay, 0, plan.ramp)
       }
     }
     this.#updateFacilities(dt)
@@ -352,6 +468,7 @@ export class Traffic {
       if (car.mode === 'lane') this.#updateLane(car, dt)
       else if (car.mode === 'turn') this.#updateTurn(car, dt)
       else if (car.mode === 'path') this.#updatePath(car, dt)
+      else if (car.mode === 'ramp') this.#updateRamp(car, dt)
     }
     this.#write()
   }
@@ -386,6 +503,18 @@ export class Traffic {
 
     const toEnd = lane.len - car.s
     let vmax = car.vmax
+    if (car.takeRamp) {
+      const r = car.takeRamp
+      const d = (r.type === 'on' ? r.ss0 : r.es0) - car.s
+      if (d < 20) vmax = Math.min(vmax, V_RAMP)
+      if (d <= 0) {
+        lane.cars.splice(lane.cars.indexOf(car), 1)
+        car.mode = 'ramp'
+        car.ramp = { r, s: 0 }
+        r.cars.push(car)
+        return
+      }
+    }
     if (car.parkAt) {
       const d = car.parkAt.gate.s - car.s
       if (d < 14) vmax = Math.min(vmax, V_LOT + 0.8)
@@ -472,7 +601,7 @@ export class Traffic {
       const node = this.nodes[t.node]
       if (node.busy === car) node.busy = null
       const plan = car.nextPlan
-      return this.#enterLane(car, plan.lane, plan.nextWay, 0)
+      return this.#enterLane(car, plan.lane, plan.nextWay, 0, plan.ramp)
     }
     const p = bezier(t.p0, t.p1, t.p2, t.u), q = bezier(t.p0, t.p1, t.p2, Math.min(1, t.u + 0.05))
     const d = norm(q[0] - p[0], q[1] - p[1])
@@ -486,6 +615,43 @@ export class Traffic {
       for (const l of w.lanes) if (l.cars.some((c) => l.len - c.s < 16)) return true
     }
     return this.cars.some((c) => c.mode === 'turn' && c.turn.node === nodeId && c.turn.fromRing)
+  }
+
+  #updateRamp(car, dt) {
+    const { r } = car.ramp
+    const target = r.type === 'on' ? r.eLane : r.sLane
+    const sT = r.type === 'on' ? r.es1 : r.ss0 + r.rlen
+    let gap = Infinity
+    const idx = r.cars.indexOf(car)
+    if (idx > 0) gap = r.cars[idx - 1].ramp.s - car.ramp.s - CAR_LEN - 2.5 // 先上匝道的排在前面
+    // 匝道尽头汇入: 目标车道前后要有空档，否则停在匝道口等
+    const clear = !target.cars.some((c) => c.s > sT - 13 && c.s < sT + 8)
+    if (!clear) gap = Math.min(gap, r.len - car.ramp.s - 0.5)
+    const want = gap === Infinity ? V_RAMP : Math.min(V_RAMP, Math.sqrt(Math.max(0, 6 * gap)))
+    car.v += THREE.MathUtils.clamp(want - car.v, -BRAKE * dt, ACCEL * dt)
+    if (gap < 0.2) car.v = 0
+    car.ramp.s += car.v * dt
+    if (car.ramp.s >= r.len && clear) {
+      r.cars.splice(idx, 1)
+      car.ramp = null
+      // 下桥后优先直行（匝道车道在路中间，不适合马上转弯）
+      const plan = this.#plan(target.way)
+      const opts = this.nodes[target.way.to].out.filter((w) => w !== target.way.twin)
+      const straight = opts.find((w) => this.#moveOf(target.way, w) === 'S')
+      this.#enterLane(car, target, r.type === 'off' && straight ? straight : plan.nextWay, sT)
+      car.takeRamp = null
+      return
+    }
+    const sp = Math.min(car.ramp.s, r.len)
+    let i = 1
+    while (i < r.cum.length - 1 && r.cum[i] < sp) i++
+    const a = r.pts[i - 1], b = r.pts[i], l = r.cum[i] - r.cum[i - 1] || 1, t = (sp - r.cum[i - 1]) / l
+    car.x = a[0] + (b[0] - a[0]) * t
+    car.y = a[1] + (b[1] - a[1]) * t
+    car.h = a[2] + (b[2] - a[2]) * t
+    const d = norm(b[0] - a[0], b[1] - a[1])
+    car.dx = d[0]; car.dy = d[1]
+    car.slope = (b[2] - a[2]) / l
   }
 
   #startPath(car, pts, extra) {
@@ -581,11 +747,11 @@ export class Traffic {
     for (let i = 0; i < n; i++) {
       const c = this.cars[i], o = i * 16, s = c.scale
       // 车头朝 +X；二维方向 (dx,dy) → 三维 (dx,0,dy)。压在人行道上时抬到路沿标高
-      arr[o] = c.dx * s; arr[o + 1] = 0; arr[o + 2] = c.dy * s; arr[o + 3] = 0
+      arr[o] = c.dx * s; arr[o + 1] = c.mode === 'ramp' ? (c.slope || 0) * s : 0; arr[o + 2] = c.dy * s; arr[o + 3] = 0
       arr[o + 4] = 0; arr[o + 5] = s; arr[o + 6] = 0; arr[o + 7] = 0
       arr[o + 8] = -c.dy * s; arr[o + 9] = 0; arr[o + 10] = c.dx * s; arr[o + 11] = 0
       arr[o + 12] = c.x
-      arr[o + 13] = c.level ? ELEVATED_H + 0.02 : (c.mode === 'path' || c.mode === 'waiting') && this.nav.surfaceAt(c.x, c.y) === SURFACE.PAVE ? CURB_H + 0.02 : 0.02
+      arr[o + 13] = c.mode === 'ramp' ? (c.h || 0) + 0.02 : c.level ? ELEVATED_H + 0.02 : (c.mode === 'path' || c.mode === 'waiting') && this.nav.surfaceAt(c.x, c.y) === SURFACE.PAVE ? CURB_H + 0.02 : 0.02
       arr[o + 14] = c.y; arr[o + 15] = 1
     }
     this.mesh.count = n
