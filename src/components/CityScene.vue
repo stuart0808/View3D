@@ -19,7 +19,7 @@ const props = defineProps({
   peopleScale: { type: Number, default: 1.5 },
   styleOverrides: { type: Object, default: null },
 })
-const emit = defineEmits(['ready', 'error', 'stats'])
+const emit = defineEmits(['ready', 'error', 'stats', 'select'])
 
 const host = ref(null)
 let engine = null
@@ -40,7 +40,11 @@ async function reload() {
 }
 
 onMounted(() => {
-  engine = new CityEngine(host.value, { timeScale: props.timeScale, peopleScale: props.peopleScale, style: props.styleOverrides || {} })
+  engine = new CityEngine(host.value, {
+    timeScale: props.timeScale, peopleScale: props.peopleScale, style: props.styleOverrides || {},
+    // 点到一栋楼: 交给外面决定看哪个室内视图；外面不处理（没监听 select）时引擎会直接进第一个可用视图
+    onSelect: (info) => emit('select', info),
+  })
   engine.setPopulation(props.population)
   engine.setDwellScale(props.dwellScale)
   engine.setHeatVisible(props.heat)
@@ -64,7 +68,11 @@ watch(() => props.heat, (v) => engine?.setHeatVisible(v))
 watch(() => props.timeScale, (v) => engine?.setTimeScale(v))
 watch(() => props.attraction, (v) => v && engine?.setAttraction(v), { deep: true })
 
-defineExpose({ getEngine: () => engine })
+defineExpose({
+  getEngine: () => engine,
+  showInterior: (id, kind) => engine?.showInterior(id, kind),
+  hideInterior: () => engine?.hideInterior(),
+})
 </script>
 
 <template>

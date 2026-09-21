@@ -3,7 +3,8 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { NavGrid } from './navgrid.js'
 import { buildGround, buildBackdrop } from './ground.js'
-import { buildBuildings } from './buildings.js'
+import { buildBuildings, hiddenBuilding } from './buildings.js'
+import { Interior } from './interior.js'
 import { Crowd } from './crowd.js'
 import { HeatLayer } from './heat.js'
 import { Traffic } from './traffic.js'
@@ -66,6 +67,9 @@ export class CityEngine {
     this.scene.add(this.sun, this.sun.target)
 
     this.world = null
+    this.interior = null
+    this.onSelect = options.onSelect || null
+    this.#bindPicking()
     this.clock = new THREE.Clock()
     this.frame = 0
     this._tick = this._tick.bind(this)
@@ -95,6 +99,8 @@ export class CityEngine {
     world.add(buildBackdrop(sceneData, this.style, rand))
     const { group, heatGeometry } = buildBuildings(sceneData, this.nav, rand, this.style)
     world.add(group)
+    this.buildingsGroup = group
+    this.rand = rand
 
     this.crowd = new Crowd(sceneData, this.nav, rand, { capacity: this.options.capacity, peopleScale: this.options.peopleScale, signals: this.signals })
     this.crowd.population = this._population ?? 600
@@ -123,6 +129,7 @@ export class CityEngine {
 
   unload() {
     if (!this.world) return
+    this.hideInterior(false)
     this.scene.remove(this.world)
     this.world.traverse((o) => {
       o.geometry?.dispose()
@@ -163,6 +170,74 @@ export class CityEngine {
     sc.far = radius * 4
     sc.updateProjectionMatrix()
     this.sun.shadow.needsUpdate = true
+  }
+
+  // -------------------------------------------------------------------------
+  // 点选建筑 / 室内视图
+  // -------------------------------------------------------------------------
+  #bindPicking() {
+    const el = this.renderer.domElement
+    const ray = new THREE.Raycaster(), ndc = new THREE.Vector2()
+    let down = null
+    el.addEventListener('pointerdown', (e) => (down = [e.clientX, e.clientY]))
+    el.addEventListener('pointerup', (e) => {
+      if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5 || !this.buildingsGroup) return // 拖动视角不算点击
+      const r = el.getBoundingClientRect()
+      ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+      ray.setFromCamera(ndc, this.camera)
+      const hit = ray.intersectObjects(this.buildingsGroup.children, false)[0]
+      if (!hit) return
+      const attr = hit.object.geometry.attributes.bid
+      const bid = attr ? attr.getX(hit.object.isInstancedMesh ? hit.instanceId : hit.face.a) : -1
+      if (bid < 0 || bid === hiddenBuilding.value) return
+      const info = this.buildingInfo(this.sceneData.buildings[bid].id)
+      if (this.onSelect) this.onSelect(info)
+      else if (info.views.length) this.showInterior(info.id, info.views[0])
+    })
+  }
+
+  /** 这栋楼能看哪些室内视图、此刻楼里多少人、车库占用多少 */
+  buildingInfo(id) {
+    const b = this.sceneData.buildings.find((x) => x.id === id)
+    const garage = this.traffic?.garageInfo(id) || null
+    const views = []
+    if (b.kind !== 'block') views.push('mall')
+    if (garage) views.push('garage')
+    return { id, kind: b.kind, floors: b.floors, views, visitors: this.crowd?.buildings.get(id)?.visitors ?? 0, garage: garage && { capacity: garage.capacity, occupied: garage.occupied } }
+  }
+
+  showInterior(id, kind = 'mall') {
+    const idx = this.sceneData.buildings.findIndex((x) => x.id === id)
+    if (idx < 0) return
+    const b = this.sceneData.buildings[idx]
+    const saved = this.interior?.saved || { target: this.controls.target.clone(), position: this.camera.position.clone(), zoom: this.camera.zoom }
+    this.hideInterior(false)
+    hiddenBuilding.value = idx
+    this.interior = new Interior(b, kind, { rand: this.rand, angle: this.sceneData.angle || 0, garage: this.traffic?.garageInfo(id) })
+    this.interior.saved = saved
+    this.interior.buildingId = id
+    this.world.add(this.interior.group)
+    // 镜头推到这栋楼
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const [x, y] of b.polygon) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y) }
+    const size = Math.hypot(maxX - minX, maxY - minY)
+    this.#flyTo((minX + maxX) / 2, (minY + maxY) / 2, Math.min(12, (this.camera.top * 2) / (size * 1.5))) // 正交相机: 可见高度 = 视口高 / zoom
+  }
+
+  hideInterior(restoreCamera = true) {
+    if (!this.interior) return
+    hiddenBuilding.value = -1
+    this.world?.remove(this.interior.group)
+    this.interior.dispose()
+    const s = this.interior.saved
+    this.interior = null
+    if (restoreCamera && s) this.#flyTo(s.target.x, s.target.z, s.zoom)
+  }
+
+  /** 保持视角方向不变，平移到 (x,z) 并缩放，0.6 秒缓动 */
+  #flyTo(x, z, zoom) {
+    const t0 = this.controls.target.clone(), off = this.camera.position.clone().sub(t0)
+    this.fly = { t: 0, from: t0, to: new THREE.Vector3(x, 0, z), off, z0: this.camera.zoom, z1: zoom }
   }
 
   setPopulation(n) {
@@ -209,6 +284,20 @@ export class CityEngine {
       this.crowd.update(simDt)
       if (this.crowd.ready) this.traffic?.update(simDt)
       if (this.heat && this.heatVisible) this.heat.update(simDt, this.crowd.heatSamples, this.crowd.heatCount)
+    }
+    if (this.interior) {
+      const id = this.interior.buildingId
+      this.interior.update(dt * this.timeScale, this.interior.kind === 'garage' ? this.traffic?.garageInfo(id) : this.crowd?.buildings.get(id)?.visitors)
+    }
+    if (this.fly) {
+      const f = this.fly
+      f.t = Math.min(1, f.t + dt / 0.6)
+      const k = f.t * f.t * (3 - 2 * f.t)
+      this.controls.target.lerpVectors(f.from, f.to, k)
+      this.camera.position.copy(this.controls.target).add(f.off)
+      this.camera.zoom = f.z0 + (f.z1 - f.z0) * k
+      this.camera.updateProjectionMatrix()
+      if (f.t >= 1) this.fly = null
     }
     this.controls.update()
     this.renderer.render(this.scene, this.camera)

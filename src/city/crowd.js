@@ -9,6 +9,26 @@ import { CURB_H } from './ground.js'
 const FREE = 0, WALK = 1, ENTER = 2, INSIDE = 3, EXIT = 4, IDLE = 5 // IDLE: 在公园/广场里站着歇会儿
 const PALETTE = ['#f5f5f4', '#f5f5f4', '#e7e5e4', '#d6d3d1', '#cbd5e1', '#94a3b8', '#64748b', '#475569', '#334155', '#1f2937', '#1f2937', '#9a6b4b', '#3b5b8c']
 
+export function personGeometry() {
+  const body = new THREE.CapsuleGeometry(0.2, 0.95, 3, 8)
+  body.scale(1.25, 1, 0.9)
+  body.translate(0, 0.68, 0)
+  const head = new THREE.SphereGeometry(0.17, 10, 8)
+  head.translate(0, 1.56, 0)
+  const geo = mergeGeometries([body, head])
+  // 下半身压暗一点，远看有「上衣 + 裤子」的层次
+  const pos = geo.attributes.position
+  const colors = new Float32Array(pos.count * 3)
+  for (let i = 0; i < pos.count; i++) {
+    const v = pos.getY(i) < 0.72 ? 0.55 : 1
+    colors.set([v, v, v], i * 3)
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  return geo
+}
+
+export const PEOPLE_PALETTE = PALETTE
+
 export class Crowd {
   constructor(scene, nav, rand, { capacity = 4000, peopleScale = 1.5, signals = null } = {}) {
     this.nav = nav
@@ -117,20 +137,7 @@ export class Crowd {
   }
 
   #buildMesh() {
-    const body = new THREE.CapsuleGeometry(0.2, 0.95, 3, 8)
-    body.scale(1.25, 1, 0.9)
-    body.translate(0, 0.68, 0)
-    const head = new THREE.SphereGeometry(0.17, 10, 8)
-    head.translate(0, 1.56, 0)
-    const geo = mergeGeometries([body, head])
-    // 下半身压暗一点，远看有「上衣 + 裤子」的层次
-    const pos = geo.attributes.position
-    const colors = new Float32Array(pos.count * 3)
-    for (let i = 0; i < pos.count; i++) {
-      const v = pos.getY(i) < 0.72 ? 0.55 : 1
-      colors.set([v, v, v], i * 3)
-    }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    const geo = personGeometry()
     const mat = new THREE.MeshStandardMaterial({ roughness: 0.8, vertexColors: true })
     this.mesh = new THREE.InstancedMesh(geo, mat, this.capacity)
     this.mesh.name = 'crowd'

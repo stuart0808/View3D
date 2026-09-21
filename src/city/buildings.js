@@ -4,6 +4,32 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { signedArea, edgeNormal, offsetPolygon, roundPolygon, makeShape, toGround, interiorPoints, distToPolygonEdge } from './geometry.js'
 
 const FLOOR_H = 4.4
+
+/**
+ * 室内视图要「单独隐藏某一栋楼」，但所有楼是合并成几个大网格画的。
+ * 做法: 每个顶点（或实例）带一个建筑编号 bid，着色器里遇到 bid == hiddenBuilding 就把顶点扔到裁剪空间外。
+ * 零额外 draw call；阴影用的深度材质也打同样的补丁，否则隐藏的楼还会投影。
+ */
+export const hiddenBuilding = { value: -1 }
+
+export function hideable(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.hiddenBid = hiddenBuilding
+    shader.vertexShader = 'attribute float bid;\nuniform float hiddenBid;\n' +
+      shader.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n  if (abs(bid - hiddenBid) < 0.5) gl_Position = vec4(0.0, 0.0, 2.0, 1.0);')
+  }
+  return material
+}
+
+function withShadowHiding(mesh) {
+  mesh.customDepthMaterial = hideable(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }))
+  return mesh
+}
+
+function tag(geometry, bid) {
+  geometry.setAttribute('bid', new THREE.BufferAttribute(new Float32Array(geometry.attributes.position.count).fill(bid), 1))
+  return geometry
+}
 const CORNER_R = 1.6
 
 // 店面主题: [玻璃色, 招牌色]
@@ -22,7 +48,8 @@ export function buildBuildings(scene, nav, rand, style) {
   const walls = [], trims = [], roofs = [], heatRoofs = []
   const glass = [], signs = [], frames = [] // {pos, quat, scale, color}
 
-  for (const b of scene.buildings) {
+  scene.buildings.forEach((b, bid) => {
+    const mark = [walls.length, trims.length, roofs.length, heatRoofs.length, glass.length, signs.length, frames.length]
     const h = (b.floors || 2) * FLOOR_H
     const holes = b.holes || []
     const body = roundPolygon(b.polygon, CORNER_R)
@@ -60,12 +87,15 @@ export function buildBuildings(scene, nav, rand, style) {
 
     addFacades(b, h, nav, rand, glass, signs, frames)
     addRoofProps(b, h, rand, trims)
-  }
+    // 这一栋新增的所有几何体/实例统一打上编号
+    ;[walls, trims, roofs, heatRoofs].forEach((list, k) => { for (let i = mark[k]; i < list.length; i++) tag(list[i], bid) })
+    ;[glass, signs, frames].forEach((list, k) => { for (let i = mark[4 + k]; i < list.length; i++) list[i].bid = bid })
+  })
 
-  const mat = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...extra })
+  const mat = (color, extra = {}) => hideable(new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...extra }))
   const addMerged = (geos, material, name, cast = true) => {
     if (!geos.length) return null
-    const mesh = new THREE.Mesh(mergeGeometries(geos.map(stripUV), false), material)
+    const mesh = withShadowHiding(new THREE.Mesh(mergeGeometries(geos.map(stripUV), false), material))
     mesh.name = name
     mesh.castShadow = cast
     mesh.receiveShadow = true
@@ -83,9 +113,9 @@ export function buildBuildings(scene, nav, rand, style) {
 
   const heatGeometry = heatRoofs.length ? mergeGeometries(heatRoofs.map(stripUV), false) : null
 
-  group.add(instancedBoxes(glass, new THREE.MeshStandardMaterial({ roughness: 0.18, metalness: 0.15 }), 'glass', false))
-  group.add(instancedBoxes(signs, new THREE.MeshStandardMaterial({ roughness: 0.7 }), 'signs', true))
-  group.add(instancedBoxes(frames, new THREE.MeshStandardMaterial({ roughness: 0.8 }), 'frames', false))
+  group.add(instancedBoxes(glass, hideable(new THREE.MeshStandardMaterial({ roughness: 0.18, metalness: 0.15 })), 'glass', false))
+  group.add(instancedBoxes(signs, hideable(new THREE.MeshStandardMaterial({ roughness: 0.7 })), 'signs', true))
+  group.add(instancedBoxes(frames, hideable(new THREE.MeshStandardMaterial({ roughness: 0.8 })), 'frames', false))
   return { group, heatGeometry }
 }
 
@@ -199,8 +229,9 @@ function instancedBoxes(items, material, name, castShadow) {
     mesh.setMatrixAt(i, m)
     mesh.setColorAt(i, c.set(it.color))
   })
+  mesh.geometry.setAttribute('bid', new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, items.length)).map((_, i) => items[i]?.bid ?? -2), 1))
   mesh.castShadow = castShadow
   mesh.receiveShadow = true
   mesh.frustumCulled = false
-  return mesh
+  return withShadowHiding(mesh)
 }

@@ -1,5 +1,6 @@
 // 屋顶热力图: 把人群密度溅射到一张低分辨率画布上，屋顶覆盖层按世界坐标采样并做色带映射。
 import * as THREE from 'three'
+import { hiddenBuilding } from './buildings.js'
 
 export class HeatLayer {
   constructor(scene, geometry, { metersPerPixel = 1.5 } = {}) {
@@ -28,13 +29,17 @@ export class HeatLayer {
         origin: { value: new THREE.Vector2(b.minX, b.minY) },
         size: { value: new THREE.Vector2(b.maxX - b.minX, b.maxY - b.minY) },
         opacity: { value: 0.9 },
+        hiddenBid: hiddenBuilding,
       },
       vertexShader: /* glsl */ `
+        attribute float bid;
+        uniform float hiddenBid;
         varying vec2 vWorld;
         void main() {
           vec4 w = modelMatrix * vec4(position, 1.0);
           vWorld = w.xz;
           gl_Position = projectionMatrix * viewMatrix * w;
+          if (abs(bid - hiddenBid) < 0.5) gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
         }`,
       fragmentShader: /* glsl */ `
         uniform sampler2D heatMap;
