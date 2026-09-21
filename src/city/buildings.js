@@ -47,9 +47,18 @@ export function buildBuildings(scene, nav, rand, style) {
   group.name = 'buildings'
   const walls = [], trims = [], roofs = [], heatRoofs = []
   const glass = [], signs = [], frames = [] // {pos, quat, scale, color}
+  const extras = { pitch: [], venueGlass: [] } // 场馆专用的几类面: 草坪、玻璃幕
 
   scene.buildings.forEach((b, bid) => {
     const mark = [walls.length, trims.length, roofs.length, heatRoofs.length, glass.length, signs.length, frames.length]
+    if (b.kind === 'venue') {
+      // 活动场馆不走「轮廓拉伸 + 店面」那一套，按类型做专门的造型
+      const em = [extras.pitch.length, extras.venueGlass.length]
+      buildVenue(b, walls, trims, heatRoofs, extras)
+      ;[walls, trims, roofs, heatRoofs].forEach((list, k) => { for (let i = mark[k]; i < list.length; i++) tag(list[i], bid) })
+      ;[extras.pitch, extras.venueGlass].forEach((list, k) => { for (let i = em[k]; i < list.length; i++) tag(list[i], bid) })
+      return
+    }
     const h = (b.floors || 2) * FLOOR_H
     const holes = b.holes || []
     const body = roundPolygon(b.polygon, CORNER_R)
@@ -111,12 +120,65 @@ export function buildBuildings(scene, nav, rand, style) {
   const roofMesh = roofs.length ? new THREE.Mesh(mergeGeometries(roofs, false), roofMat) : null
   if (roofMesh) { roofMesh.receiveShadow = true; roofMesh.name = 'roofs'; group.add(roofMesh) }
 
+  if (extras.pitch.length) addMerged(extras.pitch, mat('#86b574', { roughness: 1 }), 'pitch', false)
+  if (extras.venueGlass.length) addMerged(extras.venueGlass, mat('#9cc3dc', { roughness: 0.12, metalness: 0.35 }), 'venueGlass', false)
+
   const heatGeometry = heatRoofs.length ? mergeGeometries(heatRoofs.map(stripUV), false) : null
 
   group.add(instancedBoxes(glass, hideable(new THREE.MeshStandardMaterial({ roughness: 0.18, metalness: 0.15 })), 'glass', false))
   group.add(instancedBoxes(signs, hideable(new THREE.MeshStandardMaterial({ roughness: 0.7 })), 'signs', true))
   group.add(instancedBoxes(frames, hideable(new THREE.MeshStandardMaterial({ roughness: 0.8 })), 'frames', false))
   return { group, heatGeometry }
+}
+
+/**
+ * 场馆造型。只用到轮廓（绕形心缩放得到一圈圈同心环）和场馆类型:
+ *   stadium  外墙一圈 + 逐级下降的阶梯看台 + 中间草坪 + 顶上一圈挑出的环形罩棚
+ *   其他     基座 + 椭球形壳体 + 一条贯穿壳体的玻璃幕带（剧院 / 音乐厅常见的样子）
+ * 屋顶热力层: 体育场铺在罩棚上，剧院直接贴着壳体。
+ */
+function buildVenue(b, walls, trims, heatRoofs, extras) {
+  const poly = b.polygon
+  let cx = 0, cy = 0
+  for (const [x, y] of poly) { cx += x; cy += y }
+  cx /= poly.length
+  cy /= poly.length
+  const ring = (k) => poly.map(([x, y]) => [cx + (x - cx) * k, cy + (y - cy) * k])
+  const annulus = (k0, k1, depth, y) => toGround(new THREE.ExtrudeGeometry(makeShape(ring(k0), k1 > 0 ? [ring(k1)] : []), { depth, bevelEnabled: false, curveSegments: 1 }), y)
+
+  if (b.venue?.type === 'stadium') {
+    const H = 25
+    walls.push(annulus(1, 0.9, H, 0))
+    const N = 9
+    for (let i = 0; i < N; i++) { // 看台: 从外圈 22m 高逐级降到场边 3m
+      const k0 = 0.9 - (i * 0.4) / N, k1 = 0.9 - ((i + 1) * 0.4) / N
+      trims.push(annulus(k0, k1, 22 - (i * 19) / N, 0))
+    }
+    extras.pitch.push(toGround(new THREE.ShapeGeometry(makeShape(ring(0.5))), 0.4))
+    trims.push(annulus(1.06, 0.68, 1.3, H + 1.2)) // 环形罩棚，向场内挑出
+    heatRoofs.push(toGround(new THREE.ShapeGeometry(makeShape(ring(1.06), [ring(0.68)])), H + 2.6))
+    return
+  }
+
+  // 主轴方向和两个半径（轮廓大多是椭圆，用顶点的协方差估）
+  let sxx = 0, syy = 0, sxy = 0
+  for (const [x, y] of poly) { sxx += (x - cx) ** 2; syy += (y - cy) ** 2; sxy += (x - cx) * (y - cy) }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy), ca = Math.cos(ang), sa = Math.sin(ang)
+  let rx = 1, ry = 1
+  for (const [x, y] of poly) { rx = Math.max(rx, Math.abs((x - cx) * ca + (y - cy) * sa)); ry = Math.max(ry, Math.abs(-(x - cx) * sa + (y - cy) * ca)) }
+  const BASE = 4.5, DOME = Math.min(22, Math.min(rx, ry) * 0.62)
+  walls.push(annulus(1, 0, BASE, 0))
+  trims.push(annulus(1.07, 0, 0.7, 0)) // 基座外的一圈台阶
+  const shell = (kx, ky, kz) => {
+    const g = new THREE.SphereGeometry(1, 40, 18, 0, Math.PI * 2, 0, Math.PI / 2)
+    g.scale(rx * kx, DOME * ky, ry * kz)
+    g.rotateY(-ang)
+    g.translate(cx, BASE, cy)
+    return g
+  }
+  trims.push(shell(0.93, 1, 0.93).toNonIndexed())
+  extras.venueGlass.push(shell(0.3, 1.012, 0.945).toNonIndexed()) // 玻璃幕带: 一条更窄但略高的壳，从主壳里「露」出来
+  heatRoofs.push(shell(0.945, 1.03, 0.96))
 }
 
 function stripUV(g) {

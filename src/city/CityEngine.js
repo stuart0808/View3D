@@ -307,7 +307,7 @@ export class CityEngine {
     const b = this.sceneData.buildings.find((x) => x.id === id)
     const garage = this.traffic?.garageInfo(id) || null
     const views = []
-    if (b.kind !== 'block') views.push('mall')
+    if (b.kind === 'shop') views.push('mall') // 商场一层的室内视图只对商铺楼有意义
     if (garage) views.push('garage')
     return { id, kind: b.kind, floors: b.floors, views, visitors: this.crowd?.buildings.get(id)?.visitors ?? 0, garage: garage && { capacity: garage.capacity, occupied: garage.occupied } }
   }

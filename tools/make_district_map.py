@@ -162,6 +162,10 @@ def main():
             continue
         kind = rng.choice(["office", "commercial", "mixed", "park"], p=[0.4, 0.3, 0.22, 0.08]) if inside_ring(cent[b]) \
             else rng.choice(["residential", "residential", "commercial", "park", "mixed"], p=[0.42, 0.2, 0.14, 0.1, 0.14])
+        # 核心区里留两个住宅小区（街区正北 A、B 两条街之间，和街区东侧的长条地块），住户的日常出行要从这里出发
+        cxb, cyb = cent[b]
+        if (2179 < cxb < 2490 and 830 < cyb < 1300) or (2990 < cxb < 3290 and 1250 < cyb < 2150):
+            kind = "residential"
         if kind == "park":
             m = cv2.erode((lab == b).astype(np.uint8), np.ones((15, 15), np.uint8)) > 0
             img[m] = PARK
