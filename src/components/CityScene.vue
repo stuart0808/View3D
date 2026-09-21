@@ -15,7 +15,8 @@ const props = defineProps({
   /** { 建筑id: 吸引力 }，接后端的客流/消费测算结果 */
   attraction: { type: Object, default: null },
   heat: { type: Boolean, default: true },
-  timeScale: { type: Number, default: 2 },
+  /** 仿真速度（倍）: 人、车、红绿灯、时刻表全部按它推进。0 = 暂停 */
+  rate: { type: Number, default: 10 },
   peopleScale: { type: Number, default: 1.5 },
   styleOverrides: { type: Object, default: null },
 })
@@ -41,7 +42,7 @@ async function reload() {
 
 onMounted(() => {
   engine = new CityEngine(host.value, {
-    timeScale: props.timeScale, peopleScale: props.peopleScale, style: props.styleOverrides || {},
+    clock: { rate: props.rate || 1 }, peopleScale: props.peopleScale, style: props.styleOverrides || {},
     // 点到一栋楼: 交给外面决定看哪个室内视图；外面不处理（没监听 select）时引擎会直接进第一个可用视图
     onSelect: (info) => emit('select', info),
   })
@@ -65,7 +66,7 @@ watch(() => [props.src, props.scene], reload)
 watch(() => props.population, (v) => engine?.setPopulation(v))
 watch(() => props.dwellScale, (v) => engine?.setDwellScale(v))
 watch(() => props.heat, (v) => engine?.setHeatVisible(v))
-watch(() => props.timeScale, (v) => engine?.setTimeScale(v))
+watch(() => props.rate, (v) => engine?.setRate(v))
 watch(() => props.attraction, (v) => v && engine?.setAttraction(v), { deep: true })
 
 defineExpose({

@@ -1,10 +1,9 @@
 // 仿真时钟 + 日历。整个城市里所有「随时间变化」的东西（人群作息、场馆活动、地铁/铁路时刻表、车流强度、昼夜光照）
 // 都只读这一个时钟，保证彼此对得上。
 //
-// 两种时间要分清:
-//   · 日程时间（这里）: 默认 1 现实秒 = 1 仿真分钟，一天 24 分钟走完。决定「现在该有多少人、谁去哪、几点发车」。
-//   · 动作时间（引擎的 timeScale）: 小人走路、车开动的快慢，只比真实快 2 倍左右，否则就成瞬移了。
-// 两者故意不同步: 日程走得快，动作保持可看。代价是一趟通勤在画面里要花的「日程时间」比真实长，属于可视化的取舍。
+// 全城只有这一种时间。rate = 仿真速度（每现实秒过多少仿真秒）: 人走路、车行驶、红绿灯、店里停留、发车间隔，
+// 全都按同一个 rate 推进 —— 调到 60 倍，小人就真的以 60 倍速走路，而不是「日程走得快、动作照旧」再靠别的手段把人凑齐。
+// 引擎每帧把这一帧的仿真时长切成若干小步去推进物理，所以倍速高了也稳定；倍速高到一帧算不完时，时钟会自动慢下来等物理。
 
 const DAY_MS = 86400000
 
@@ -24,15 +23,15 @@ const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDat
 export class SimClock {
   /**
    * @param start  起始时刻（本地时间）
-   * @param rate   日程时间流速: 每现实秒过多少仿真秒。60 = 一秒一分钟
+   * @param rate   仿真速度: 每现实秒过多少仿真秒。1 = 实时，60 = 一秒一分钟
    */
-  constructor({ start = '2026-09-21T07:30:00', rate = 60, holidays = DEFAULT_HOLIDAYS, makeupWorkdays = DEFAULT_MAKEUP_WORKDAYS } = {}) {
+  constructor({ start = '2026-09-21T07:30:00', rate = 10, holidays = DEFAULT_HOLIDAYS, makeupWorkdays = DEFAULT_MAKEUP_WORKDAYS } = {}) {
     this.t = new Date(start).getTime()
     this.rate = rate
     this.paused = false
     this.holidays = new Set(holidays)
     this.makeupWorkdays = new Set(makeupWorkdays)
-    this.listeners = new Set() // (event, clock) => void；event: 'minute' | 'hour' | 'day'
+    this.listeners = new Set() // (event, clock) => void；event: 'minute' | 'hour' | 'day' | 'jump'
     this._lastMinute = Math.floor(this.t / 60000)
   }
 
@@ -100,7 +99,8 @@ export class SimClock {
   #jump(ms) {
     this.t = ms
     this._lastMinute = Math.floor(ms / 60000)
-    this.#emit('day') // 跳时间等同于换了一天: 让排期、时刻表重新生成
+    this.#emit('jump') // 手动跳时间: 世界状态不连续了，人群要按新时刻重新布置，排期、时刻表重新生成
+    this.#emit('day')
     this.#emit('hour')
   }
 }

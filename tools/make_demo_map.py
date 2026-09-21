@@ -24,31 +24,11 @@ ELEVATED = (128, 0, 255)
 W, H = 3000, 2200  # 画布像素；按 0.2 m/px 即 600m x 440m
 
 
-def main():
-    out = Path(sys.argv[1] if len(sys.argv) > 1 else "tools/samples/demo_marked.png")
-    rng = np.random.default_rng(7)
-
-    # 灰色底图 + 一些无关线条（模拟地图上的杂项）
-    base = np.full((H, W, 3), (232, 234, 236), np.uint8)
-    for _ in range(60):
-        p = rng.integers(0, H, 4)
-        cv2.line(base, (int(p[0]) * W // H, int(p[1])), (int(p[2]) * W // H, int(p[3])), (215, 218, 220), int(rng.integers(1, 4)), cv2.LINE_AA)
-
-    mk = np.zeros((H, W, 3), np.uint8)
-    a = np.zeros((H, W), np.uint8)  # 标记层 alpha
-
-    def R(x, y, w, h, col):
-        cv2.rectangle(mk, (x, y), (x + w, y + h), col, -1)
-        cv2.rectangle(a, (x, y), (x + w, y + h), 255, -1)
-
-    def clear(x, y, w, h):
-        cv2.rectangle(mk, (x, y), (x + w, y + h), (0, 0, 0), -1)
-        cv2.rectangle(a, (x, y), (x + w, y + h), 0, -1)
-
-    def disc(cx, cy, r, col, on=255):
-        cv2.circle(mk, (cx, cy), r, col, -1)
-        cv2.circle(a, (cx, cy), r, on, -1)
-
+def draw_demo(R, clear, disc, ellipse, elevated=True):
+    """
+    画示例街区。只通过 R / clear / disc / ellipse 四个图元作画，所以别的脚本（make_district_map.py）
+    可以传入带缩放和平移的图元，把整个街区嵌到更大的地图里。坐标按 3000x2200、0.2 m/px。
+    """
     # ---- 道路 ----
     o, rw = 130, 120                      # 环路: 约 22m，双向六车道
     R(o, o, W - 2 * o, rw, BLUE)
@@ -65,7 +45,8 @@ def main():
     disc(924, 644, 118, BLUE)
     disc(924, 644, 52, (0, 0, 0), on=0)
     # 高架: 盖在主干路正上方，两端伸出环路
-    R(30, 1050, W - 60, 100, ELEVATED)
+    if elevated:
+        R(30, 1050, W - 60, 100, ELEVATED)
 
     # ---- 北半区 ----
     # 西北上: L 形商铺 + 高楼
@@ -85,8 +66,7 @@ def main():
     R(1380, 850, 275, 98, PLAZA)
     # 东北: 公园 + 水池
     R(1825, 295, 430, 655, PARK)
-    cv2.ellipse(mk, (2040, 600), (130, 190), 15, 0, 360, WATER, -1)
-    cv2.ellipse(a, (2040, 600), (130, 190), 15, 0, 360, 255, -1)
+    ellipse(2040, 600, 130, 190, 15, WATER)
     # 最东北: 三栋住宅高楼 + 绿地
     for y in (295, 520, 745):
         R(2393, y, 312, 110, MAGENTA)
@@ -126,6 +106,39 @@ def main():
     e = 112
     for x, y in [(e, e), (W - e, e), (e, H - e), (W - e, H - e), (924, e), (924, H - e), (1740, e), (1740, H - e), (2324, e), (2324, H - e), (e, 644), (e, 1584), (W - e, 1584), (W - e, 644)]:
         disc(x, y, 7, CYAN)
+
+
+
+def main():
+    out = Path(sys.argv[1] if len(sys.argv) > 1 else "tools/samples/demo_marked.png")
+    rng = np.random.default_rng(7)
+
+    # 灰色底图 + 一些无关线条（模拟地图上的杂项）
+    base = np.full((H, W, 3), (232, 234, 236), np.uint8)
+    for _ in range(60):
+        p = rng.integers(0, H, 4)
+        cv2.line(base, (int(p[0]) * W // H, int(p[1])), (int(p[2]) * W // H, int(p[3])), (215, 218, 220), int(rng.integers(1, 4)), cv2.LINE_AA)
+
+    mk = np.zeros((H, W, 3), np.uint8)
+    a = np.zeros((H, W), np.uint8)  # 标记层 alpha
+
+    def R(x, y, w, h, col):
+        cv2.rectangle(mk, (x, y), (x + w, y + h), col, -1)
+        cv2.rectangle(a, (x, y), (x + w, y + h), 255, -1)
+
+    def clear(x, y, w, h):
+        cv2.rectangle(mk, (x, y), (x + w, y + h), (0, 0, 0), -1)
+        cv2.rectangle(a, (x, y), (x + w, y + h), 0, -1)
+
+    def disc(cx, cy, r, col, on=255):
+        cv2.circle(mk, (cx, cy), r, col, -1)
+        cv2.circle(a, (cx, cy), r, on, -1)
+
+    def ellipse(cx, cy, rx, ry, ang, col):
+        cv2.ellipse(mk, (cx, cy), (rx, ry), ang, 0, 360, col, -1)
+        cv2.ellipse(a, (cx, cy), (rx, ry), ang, 0, 360, 255, -1)
+
+    draw_demo(R, clear, disc, ellipse)
 
     # 整体旋转 6°（带抗锯齿），再叠到底图上
     M = cv2.getRotationMatrix2D((W / 2, H / 2), 6, 0.9)

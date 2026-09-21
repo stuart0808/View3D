@@ -226,7 +226,7 @@ export class Crowd {
     if (d.type === 'spot') {
       this.state[i] = IDLE
       this.vx[i] = this.vy[i] = 0
-      this.timer[i] = (10 + this.rand() * 30) * this.dwellScale
+      this.timer[i] = (8 + this.rand() * 25) * 60 * this.dwellScale // 在公园/广场歇 8~33 分钟
       return
     }
     this.state[i] = ENTER
@@ -253,7 +253,22 @@ export class Crowd {
     this.ex[i] = d.c[0]; this.ey[i] = d.c[1]
   }
 
-  update(dt) {
+  /** 手动跳时间之后: 清空所有人，按当前目标人数重新撒一遍 */
+  reseed() {
+    this.state.fill(FREE)
+    this.high = this.active = this.insideCount = 0
+    for (const b of this.buildings.values()) b.visitors = 0
+    if (!this.ready) return
+    const n = Math.min(this.population, this.capacity)
+    for (let i = 0; i < n && this.reachable.length; i++) {
+      const [px, py] = this.nav.center(this.reachable[(this.rand() * this.reachable.length) | 0])
+      this.#spawn(px, py, true)
+    }
+    this.#writeInstances()
+  }
+
+  /** dt = 仿真秒。write=false 时只推进状态不写实例矩阵（一帧里有多个子步时，只有最后一步需要写） */
+  update(dt, write = true) {
     if (!this.ready && !this.#warmup()) return
     const { nav, state, x, y, vx, vy } = this
     const la = this._la
@@ -266,20 +281,6 @@ export class Crowd {
         this.spawnDebt -= 1
         const p = this.dests[this.#pickPortal()]
         this.#spawn(p.c[0], p.c[1])
-      }
-    }
-
-    // 人比目标多（入夜、活动散场后）: 每帧劝几个人提前回家 —— 街上的直接改去最近的出入口，店里的缩短停留
-    if (this.active > want * 1.1 + 5 && this.portals.length) {
-      for (let n = 0; n < 4; n++) {
-        const i = (this.rand() * this.high) | 0
-        if (state[i] === WALK && this.dests[this.dest[i]].type !== 'portal') {
-          const p = this.#pick(this.portals, x[i], y[i])
-          if (p >= 0) { this.dest[i] = p; this.stops[i] = 0 }
-        } else if (state[i] === INSIDE || state[i] === IDLE) {
-          this.stops[i] = 0
-          this.timer[i] = Math.min(this.timer[i], 2)
-        }
       }
     }
 
@@ -372,13 +373,13 @@ export class Crowd {
       else { vx[i] *= 0.2; vy[i] *= 0.2 }
       this.phase[i] += dt * 9 * this.speed[i]
     }
-    this.#writeInstances()
+    if (write) this.#writeInstances()
   }
 
   #goInside(i, d) {
     this.state[i] = INSIDE
     this.scale[i] = 0
-    this.timer[i] = (25 + this.rand() * 50) * this.dwellScale
+    this.timer[i] = (5 + this.rand() * 20) * 60 * this.dwellScale // 逛一家店 5~25 分钟（仿真时间）
     const b = this.buildings.get(d.building)
     b.visitors++
     this.insideCount++

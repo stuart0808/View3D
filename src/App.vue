@@ -8,8 +8,8 @@ const sceneName = new URLSearchParams(location.search).get('scene') || 'demo'
 const heat = ref(true)
 const base = ref(600)
 // 人数、车流、昼夜都由仿真时钟驱动（src/city/clock.js）。这里只是把时钟显示出来，给几个「跳到某个时刻」的演示按钮
-const rate = ref(60)
-const RATES = [{ v: 0, t: '暂停' }, { v: 60, t: '1分/秒' }, { v: 300, t: '5分/秒' }, { v: 1200, t: '20分/秒' }]
+const rate = ref(10)
+const RATES = [{ v: 0, t: '暂停' }, { v: 1, t: '1×' }, { v: 10, t: '10×' }, { v: 30, t: '30×' }, { v: 60, t: '60×' }, { v: 120, t: '120×' }]
 const JUMPS = [
   { t: '早高峰', f: (c) => c.jumpToHour(8) },
   { t: '午间', f: (c) => c.jumpToHour(12.5) },
@@ -18,12 +18,7 @@ const JUMPS = [
   { t: '下个周末', f: (c) => c.jumpToDayType('weekend', 15) },
   { t: '下个节假日', f: (c) => c.jumpToDayType('holiday', 15) },
 ]
-function setRate(v) {
-  rate.value = v
-  const c = city.value.clock()
-  c.paused = v === 0
-  if (v) c.setRate(v)
-}
+const setRate = (v) => (rate.value = v)
 const stats = ref(null)
 const city = ref(null)
 // 点到一栋楼 → 进室内视图；有多种视图（商场 / 地下车库）时用底部的小条切换
@@ -64,6 +59,7 @@ const onReady = (engine) => (window.__city = engine)
     ref="city"
     :src="`/scenes/${sceneName}.json`"
     :population="base"
+    :rate="rate"
     :heat="heat"
     @stats="stats = $event"
     @ready="onReady"

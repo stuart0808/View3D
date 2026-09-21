@@ -36,9 +36,8 @@ export const DEFAULT_STYLE = {
 export class CityEngine {
   constructor(container, options = {}) {
     this.container = container
-    this.options = { seed: 7, peopleScale: 1.5, timeScale: 2, capacity: 4000, ...options }
+    this.options = { seed: 7, peopleScale: 1.5, capacity: 4000, ...options }
     this.style = { ...DEFAULT_STYLE, ...(options.style || {}) }
-    this.timeScale = this.options.timeScale
     this.heatVisible = true
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
@@ -75,7 +74,10 @@ export class CityEngine {
     this.scene.add(this.sun, this.sun.target)
 
     this.clock = new SimClock(options.clock)
-    this.clock.on((ev) => ev !== 'minute' && (this._envTimer = 0)) // 跳时间 / 整点: 立刻刷新一次环境
+    this.clock.on((ev) => {
+      if (ev !== 'minute') this._envTimer = 0 // 整点 / 跳时间: 立刻刷新一次环境
+      if (ev === 'jump' && this.crowd) { this.#applyEnvironment(1); this.crowd.reseed() } // 跳时间后世界不连续，按新时刻重新布置人群
+    })
     this._envTimer = 0
     this.world = null
     this.interior = null
@@ -349,7 +351,8 @@ export class CityEngine {
     if (this.heat) this.heat.mesh.visible = v
   }
 
-  setTimeScale(s) { this.timeScale = s }
+  /** 仿真速度（倍）。0 = 暂停 */
+  setRate(r) { this.clock.paused = r <= 0; if (r > 0) this.clock.setRate(r) }
 
   stats() { return this.crowd ? { ...this.crowd.stats(), clock: this.clock.label, dayType: this.clock.dayType, cars: this.traffic?.roadCount ?? 0 } : null }
 
@@ -370,18 +373,26 @@ export class CityEngine {
   _tick() {
     this.raf = requestAnimationFrame(this._tick)
     const dt = Math.min(this.timer.getDelta(), 0.05)
-    this.clock.tick(dt)
+    // 这一帧要推进多少仿真秒。物理按小步走（车 ≤0.25s、人 ≤0.5s 一步）才稳定；
+    // 一帧最多 16 小步，倍速高到算不完时少推进一点，时钟自然就慢下来等物理
+    const MAX_STEPS = 16, CAR_STEP = 0.25
+    const simDt = this.clock.tick(Math.min(dt, (MAX_STEPS * CAR_STEP) / Math.max(1, this.clock.rate)))
     this.#applyEnvironment(dt)
-    if (this.crowd) {
-      const simDt = dt * this.timeScale
-      this.signals?.update(simDt)
-      this.crowd.update(simDt)
-      if (this.crowd.ready) this.traffic?.update(simDt)
-      if (this.heat && this.heatVisible) this.heat.update(simDt, this.crowd.heatSamples, this.crowd.heatCount)
+    if (this.crowd && simDt > 0) {
+      const n = Math.max(1, Math.ceil(simDt / CAR_STEP)), step = simDt / n
+      let crowdDt = 0
+      for (let i = 0; i < n; i++) {
+        this.signals?.update(step)
+        crowdDt += step
+        const last = i === n - 1
+        if (crowdDt >= 0.5 || last) { this.crowd.update(crowdDt, last); crowdDt = 0 }
+        if (this.crowd.ready) this.traffic?.update(step, last)
+      }
+      if (this.heat && this.heatVisible) this.heat.update(dt, this.crowd.heatSamples, this.crowd.heatCount) // 热力的时间平滑按现实时间，倍速再高也不闪
     }
     if (this.interior) {
       const id = this.interior.buildingId
-      this.interior.update(dt * this.timeScale, this.interior.kind === 'garage' ? this.traffic?.garageInfo(id) : this.crowd?.buildings.get(id)?.visitors)
+      this.interior.update(simDt, this.interior.kind === 'garage' ? this.traffic?.garageInfo(id) : this.crowd?.buildings.get(id)?.visitors)
     }
     this.#applyKeys(dt)
     if (this.fly) {

@@ -493,7 +493,8 @@ export class Traffic {
     return n
   }
 
-  update(dt) {
+  /** dt = 仿真秒；write=false 时不写实例矩阵（一帧多个子步，只有最后一步要写） */
+  update(dt, write = true) {
     if (!this.ways.length) return
     // 出图的车从入口补回来
     if (this.entries.length && this.roadCount < this.target) {
@@ -513,7 +514,7 @@ export class Traffic {
       else if (car.mode === 'path') this.#updatePath(car, dt)
       else if (car.mode === 'ramp') this.#updateRamp(car, dt)
     }
-    this.#write()
+    if (write) this.#write()
   }
 
   #updateLane(car, dt) {
@@ -879,7 +880,7 @@ export class Traffic {
       }
       f.timer -= dt
       if (f.timer > 0) continue
-      f.timer = 7 + this.rand() * 16
+      f.timer = 40 + this.rand() * 100 // 每个出入口大约一两分钟出一辆车（仿真时间）
       if (this.roadCount >= this.target) continue // 路上车已经够多就先不放车出来
       if (f.type === 'lot') {
         const parked = f.stalls.filter((st) => st.car && st.car.mode === 'parked')
