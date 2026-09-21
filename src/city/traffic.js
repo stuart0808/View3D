@@ -49,7 +49,8 @@ export class Traffic {
     this.mesh.setColorAt(0, new THREE.Color('#fff')) // 先把 instanceColor 缓冲区建出来
 
     const total = this.ways.reduce((s, w) => s + w.lanes[0].len * w.n, 0)
-    this.target = Math.min(400, Math.round(total * density))
+    this.baseTarget = Math.min(400, Math.round(total * density))
+    this.target = this.baseTarget
     this.#seed()
   }
 
@@ -482,6 +483,9 @@ export class Traffic {
       n++
     }
   }
+
+  /** 车流强度 0~1（来自仿真时钟的日曲线）。目标车数降下来后，多出来的车会更愿意拐进停车场/车库或开出图外 */
+  setDemand(f) { this.target = Math.round(this.baseTarget * Math.max(0.12, f)) }
 
   get roadCount() {
     let n = 0

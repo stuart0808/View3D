@@ -5,16 +5,25 @@ import CityScene from './components/CityScene.vue'
 // 角落里这一小条只是调试用的开关，正式接入时删掉即可，CityScene 本身不带任何 UI。
 // ?scene=xxx 可切换 public/scenes/xxx.json
 const sceneName = new URLSearchParams(location.search).get('scene') || 'demo'
-const mode = ref('weekday')
 const heat = ref(true)
 const base = ref(600)
-
-const MODES = {
-  weekday: { label: '工作日', population: 1, dwell: 1 },
-  weekend: { label: '周末', population: 1.8, dwell: 1.3 },
+// 人数、车流、昼夜都由仿真时钟驱动（src/city/clock.js）。这里只是把时钟显示出来，给几个「跳到某个时刻」的演示按钮
+const rate = ref(60)
+const RATES = [{ v: 0, t: '暂停' }, { v: 60, t: '1分/秒' }, { v: 300, t: '5分/秒' }, { v: 1200, t: '20分/秒' }]
+const JUMPS = [
+  { t: '早高峰', f: (c) => c.jumpToHour(8) },
+  { t: '午间', f: (c) => c.jumpToHour(12.5) },
+  { t: '晚高峰', f: (c) => c.jumpToHour(18) },
+  { t: '夜晚', f: (c) => c.jumpToHour(21.5) },
+  { t: '下个周末', f: (c) => c.jumpToDayType('weekend', 15) },
+  { t: '下个节假日', f: (c) => c.jumpToDayType('holiday', 15) },
+]
+function setRate(v) {
+  rate.value = v
+  const c = city.value.clock()
+  c.paused = v === 0
+  if (v) c.setRate(v)
 }
-const population = computed(() => Math.round(base.value * MODES[mode.value].population))
-const dwell = computed(() => MODES[mode.value].dwell)
 const stats = ref(null)
 const city = ref(null)
 // 点到一栋楼 → 进室内视图；有多种视图（商场 / 地下车库）时用底部的小条切换
@@ -54,18 +63,19 @@ const onReady = (engine) => (window.__city = engine)
   <CityScene
     ref="city"
     :src="`/scenes/${sceneName}.json`"
-    :population="population"
-    :dwell-scale="dwell"
+    :population="base"
     :heat="heat"
     @stats="stats = $event"
     @ready="onReady"
     @select="onSelect"
   />
   <div class="debug-bar">
-    <button v-for="(m, key) in MODES" :key="key" :class="{ on: mode === key }" @click="mode = key">{{ m.label }}</button>
+    <span v-if="stats" class="clock">{{ stats.clock.date }} · <b>{{ stats.clock.dayType }}</b> · {{ stats.clock.time }}</span>
+    <button v-for="r in RATES" :key="r.v" :class="{ on: rate === r.v }" @click="setRate(r.v)">{{ r.t }}</button>
+    <button v-for="j in JUMPS" :key="j.t" @click="j.f(city.clock())">{{ j.t }}</button>
     <label><input v-model="heat" type="checkbox" /> 热力</label>
-    <label>人数 <input v-model.number="base" type="range" min="0" max="2000" step="50" /> {{ population }}</label>
-    <span v-if="stats" class="stat">街上 {{ stats.walking }} · 店内 {{ stats.inside }}</span>
+    <label>高峰人数 <input v-model.number="base" type="range" min="0" max="2000" step="50" /> {{ base }}</label>
+    <span v-if="stats" class="stat">街上 {{ stats.walking }} · 店内 {{ stats.inside }} · 车 {{ stats.cars }}</span>
   </div>
   <div class="debug-bar nav-bar">
     <button v-for="n in NAV" :key="n.t" :title="n.tip" @click="n.f">{{ n.t }}</button>
@@ -80,6 +90,8 @@ const onReady = (engine) => (window.__city = engine)
 
 <style scoped>
 .debug-bar {
+  flex-wrap: wrap;
+  max-width: calc(100vw - 340px);
   position: fixed;
   left: 12px;
   bottom: 12px;
@@ -126,6 +138,10 @@ const onReady = (engine) => (window.__city = engine)
 }
 .debug-bar input[type='range'] {
   width: 110px;
+}
+.clock {
+  font-variant-numeric: tabular-nums;
+  min-width: 190px;
 }
 .stat {
   opacity: 0.7;

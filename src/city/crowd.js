@@ -269,6 +269,20 @@ export class Crowd {
       }
     }
 
+    // 人比目标多（入夜、活动散场后）: 每帧劝几个人提前回家 —— 街上的直接改去最近的出入口，店里的缩短停留
+    if (this.active > want * 1.1 + 5 && this.portals.length) {
+      for (let n = 0; n < 4; n++) {
+        const i = (this.rand() * this.high) | 0
+        if (state[i] === WALK && this.dests[this.dest[i]].type !== 'portal') {
+          const p = this.#pick(this.portals, x[i], y[i])
+          if (p >= 0) { this.dest[i] = p; this.stops[i] = 0 }
+        } else if (state[i] === INSIDE || state[i] === IDLE) {
+          this.stops[i] = 0
+          this.timer[i] = Math.min(this.timer[i], 2)
+        }
+      }
+    }
+
     // 哈希网格
     this.hashHead.fill(-1)
     for (let i = 0; i < this.high; i++) {

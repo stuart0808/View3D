@@ -5,6 +5,7 @@ import { NavGrid } from './navgrid.js'
 import { buildGround, buildBackdrop } from './ground.js'
 import { buildBuildings, hiddenBuilding } from './buildings.js'
 import { Interior } from './interior.js'
+import { SimClock, activity, daylight } from './clock.js'
 import { Crowd } from './crowd.js'
 import { HeatLayer } from './heat.js'
 import { Traffic } from './traffic.js'
@@ -62,7 +63,8 @@ export class CityEngine {
     this.keys = new Set()
     this.#bindKeys()
 
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xaab4c2, 1.15))
+    this.hemi = new THREE.HemisphereLight(0xffffff, 0xaab4c2, 1.15)
+    this.scene.add(this.hemi)
     this.sun = new THREE.DirectionalLight(0xfff6ea, 2.1)
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(4096, 4096)
@@ -72,11 +74,14 @@ export class CityEngine {
     this.sun.shadow.normalBias = 0.35
     this.scene.add(this.sun, this.sun.target)
 
+    this.clock = new SimClock(options.clock)
+    this.clock.on((ev) => ev !== 'minute' && (this._envTimer = 0)) // 跳时间 / 整点: 立刻刷新一次环境
+    this._envTimer = 0
     this.world = null
     this.interior = null
     this.onSelect = options.onSelect || null
     this.#bindPicking()
-    this.clock = new THREE.Clock()
+    this.timer = new THREE.Clock()
     this.frame = 0
     this._tick = this._tick.bind(this)
     this._resize = this._resize.bind(this)
@@ -102,14 +107,15 @@ export class CityEngine {
     // 车流要先建: 停车位线是它排的，地面标线要用
     if (this.options.traffic !== false) this.traffic = new Traffic(sceneData, this.nav, rand, { signals: this.signals })
     world.add(buildGround(sceneData, this.style, this.traffic?.parkingLines || [], (this.traffic?.ramps || []).map((r) => r.gap), this.traffic?.islands || []))
-    world.add(buildBackdrop(sceneData, this.style, rand))
+    this.backdrop = buildBackdrop(sceneData, this.style, rand)
+    world.add(this.backdrop)
     const { group, heatGeometry } = buildBuildings(sceneData, this.nav, rand, this.style)
     world.add(group)
     this.buildingsGroup = group
     this.rand = rand
 
     this.crowd = new Crowd(sceneData, this.nav, rand, { capacity: this.options.capacity, peopleScale: this.options.peopleScale, signals: this.signals })
-    this.crowd.population = this._population ?? 600
+    this._envTimer = 0
     this.crowd.dwellScale = this._dwellScale ?? 1
     world.add(this.crowd.mesh)
 
@@ -305,9 +311,30 @@ export class CityEngine {
     this.fly = { t: 0, from: t0, to: new THREE.Vector3(x, 0, z), off, z0: this.camera.zoom, z1: zoom }
   }
 
+  /** n = 一天里高峰时刻的同时在场人数；实际人数 = n × 当前时刻的活跃度曲线 */
   setPopulation(n) {
     this._population = n
-    if (this.crowd) this.crowd.population = n
+    this._envTimer = 0
+  }
+
+  /** 按仿真时钟刷新「环境」: 人数、车流强度、昼夜光照。每半秒一次就够了 */
+  #applyEnvironment(dt) {
+    this._envTimer -= dt
+    if (this._envTimer > 0 || !this.crowd) return
+    this._envTimer = 0.5
+    const { dayType, hour } = this.clock
+    this.crowd.population = Math.round((this._population ?? 600) * activity('people', dayType, hour))
+    this.traffic?.setDemand(activity('cars', dayType, hour))
+
+    const dl = daylight(hour)
+    this.sun.intensity = 0.15 + 1.95 * dl
+    this.sun.color.set('#fff6ea').lerp(new THREE.Color('#ffb070'), THREE.MathUtils.clamp((0.45 - dl) / 0.35, 0, 1)) // 清晨黄昏偏暖
+    this.hemi.intensity = 0.3 + 0.85 * dl
+    const sky = new THREE.Color('#1b2333').lerp(new THREE.Color(this.style.background), dl)
+    this.renderer.setClearColor(sky)
+    this.backdrop?.material.color.setScalar(0.13 + 0.87 * dl) // 背景楼块的颜色是烘焙的，整体压暗
+    const glass = this.buildingsGroup?.getObjectByName('glass')
+    if (glass) { glass.material.emissive.set('#ffd9a0'); glass.material.emissiveIntensity = (1 - dl) * 0.85 } // 夜里亮窗
   }
 
   setDwellScale(s) {
@@ -324,7 +351,7 @@ export class CityEngine {
 
   setTimeScale(s) { this.timeScale = s }
 
-  stats() { return this.crowd ? this.crowd.stats() : null }
+  stats() { return this.crowd ? { ...this.crowd.stats(), clock: this.clock.label, dayType: this.clock.dayType, cars: this.traffic?.roadCount ?? 0 } : null }
 
   _resize() {
     const w = this.container.clientWidth || 1, h = this.container.clientHeight || 1
@@ -342,7 +369,9 @@ export class CityEngine {
 
   _tick() {
     this.raf = requestAnimationFrame(this._tick)
-    const dt = Math.min(this.clock.getDelta(), 0.05)
+    const dt = Math.min(this.timer.getDelta(), 0.05)
+    this.clock.tick(dt)
+    this.#applyEnvironment(dt)
     if (this.crowd) {
       const simDt = dt * this.timeScale
       this.signals?.update(simDt)

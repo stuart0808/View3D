@@ -8,7 +8,7 @@ const props = defineProps({
   src: { type: String, default: '' },
   /** 直接传入已解析的场景对象 */
   scene: { type: Object, default: null },
-  /** 同时在场的目标人数 */
+  /** 一天里高峰时刻的同时在场人数（实际人数随仿真时钟的日曲线变化） */
   population: { type: Number, default: 600 },
   /** 店内停留时长倍率 */
   dwellScale: { type: Number, default: 1 },
@@ -70,6 +70,7 @@ watch(() => props.attraction, (v) => v && engine?.setAttraction(v), { deep: true
 
 defineExpose({
   getEngine: () => engine,
+  clock: () => engine?.clock,
   showInterior: (id, kind) => engine?.showInterior(id, kind),
   orbit: (dAz, dEl) => engine?.orbit(dAz, dEl),
   pan: (r, u) => engine?.pan(r, u),
