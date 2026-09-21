@@ -739,12 +739,41 @@ def main():
                     return 1 if cross < 0 else -1  # 图像坐标 y 向下: 叉积为负 = 屏幕上逆时针
             return 0
 
+        # 路口沿某条路方向的范围 = 与它相交（不共线）的那些路的半宽，而不是它自己的半宽。
+        # 窄支路接宽主干路时差别很大: 按自己路宽算，斑马线会画到主干路（甚至高架桥面）底下去。
+        edge_w = [width_of(e[2]) * mpp for e in edges]
+
+        def arm_dir(pts, at_start):
+            q = pts if at_start else pts[::-1]
+            k = min(len(q) - 1, 20)
+            d = q[k] - q[0]
+            return d / max(np.hypot(*d), 1e-9)
+
+        incident = {}
+        for ei, (a_, b_, pts_) in enumerate(edges):
+            if a_ == b_:
+                continue
+            incident.setdefault(a_, []).append((ei, arm_dir(pts_, True)))
+            incident.setdefault(b_, []).append((ei, arm_dir(pts_, False)))
+
+        def box_extent(nid, ei):
+            arms = incident.get(nid, [])
+            me = next((d for i, d in arms if i == ei), None)
+            others = [(i, d) for i, d in arms if i != ei]
+            if me is None or not others:
+                return edge_w[ei] / 2
+            if len(others) >= 2:  # 去掉和自己最接近反向的那条（同一条路穿过路口的延续）
+                cont = min(others, key=lambda t: float(np.dot(t[1], me)))
+                if float(np.dot(cont[1], me)) < -0.7:
+                    others = [t for t in others if t[0] != cont[0]]
+            return max(edge_w[i] for i, _ in others) / 2
+
         ring_nodes = set()
         for a, b, pts in edges:
             if ring_of(pts):
                 ring_nodes.update((a, b))
-        for a, b, pts in edges:
-            w_m = width_of(pts) * mpp
+        for ei, (a, b, pts) in enumerate(edges):
+            w_m = edge_w[ei]
             oneway = ring_of(pts)
             sp = cv2.approxPolyDP(pts.astype(np.float32).reshape(-1, 1, 2), max(1.5, 0.8 / mpp), False).reshape(-1, 2).astype(np.float64)
             pm = to_m(sp)
@@ -765,7 +794,7 @@ def main():
             for end, nid in ((0, a), (1, b)):
                 is_junction = deg.get(nid, 0) >= 3
                 if is_junction:
-                    d0 = w_m / 2 + CORNER + 0.5
+                    d0 = box_extent(nid, ei) + CORNER + 0.5
                     if total > 2 * (d0 + CW_DEPTH) + 4:
                         s = d0 + CW_DEPTH / 2
                         c, t = point_at(pm, s if end == 0 else total - s)
