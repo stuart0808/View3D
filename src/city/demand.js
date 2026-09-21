@@ -67,6 +67,23 @@ const EVENT_RULES = {
 }
 const INGRESS_MIN = 75, EGRESS_MIN = 35
 
+// 住户出行。三条曲线都是 [小时, 值]:
+//   HOME_DEPART  每小时离家的比例（相对此刻在家的人）—— 工作日早高峰集中出门，休息日晚且分散
+//   HOME_RETURN  每小时回来的比例（相对此刻在核心区之外的住户）—— 傍晚集中回来，深夜全部到家
+//   HOME_FRACTION 开场 / 跳时间铺场用: 此刻应该有多大比例的住户在家
+const HOME_DEPART = {
+  workday: [[0, 0], [5.5, 0.02], [6.5, 0.3], [7.5, 0.9], [8.5, 0.7], [9.5, 0.25], [11, 0.12], [17, 0.1], [19, 0.12], [21, 0.03], [23, 0], [24, 0]],
+  rest: [[0, 0], [6, 0.02], [8, 0.15], [10, 0.4], [12, 0.25], [15, 0.3], [18, 0.25], [20, 0.1], [22, 0.02], [24, 0]],
+}
+const HOME_RETURN = {
+  workday: [[0, 1], [4, 1], [5, 0.02], [11, 0.03], [12, 0.1], [16, 0.15], [17.5, 0.6], [19, 0.9], [21, 1], [24, 1]],
+  rest: [[0, 1], [4, 1], [6, 0.05], [11, 0.12], [14, 0.25], [17, 0.5], [20, 0.9], [22, 1], [24, 1]],
+}
+const HOME_FRACTION = {
+  workday: [[0, 1], [6, 0.97], [8, 0.55], [9.5, 0.3], [12, 0.35], [17, 0.35], [19, 0.6], [21, 0.85], [23, 0.97], [24, 1]],
+  rest: [[0, 1], [7, 0.95], [10, 0.65], [14, 0.5], [18, 0.55], [21, 0.8], [23, 0.95], [24, 1]],
+}
+
 function lerpCurve(pts, h) {
   for (let i = 1; i < pts.length; i++) {
     if (h <= pts[i][0]) { const [h0, v0] = pts[i - 1], [h1, v1] = pts[i]; return v0 + ((v1 - v0) * (h - h0)) / (h1 - h0 || 1) }
@@ -86,8 +103,9 @@ export class Demand {
    * @param venues [{ id(建筑id), name, type, capacity }]
    * @param eventScale 观众人数的缩放: 真实场馆动辄上万人，逐人仿真撑不住，按比例缩小（默认 0.15）
    */
-  constructor(clock, venues = [], { eventScale = 0.15 } = {}) {
+  constructor(clock, venues = [], { eventScale = 0.15, residentScale = 0.1 } = {}) {
     this.clock = clock
+    this.residentScale = residentScale // 住户人数的缩放: 一栋 1 万㎡的住宅楼真实住两百多人，按比例缩小
     this.venues = venues
     this.eventScale = eventScale
     this.events = []
@@ -158,6 +176,23 @@ export class Demand {
     const until = h < 11.3 ? 12 + (rand() - 0.5) * 0.6 : h < 17 ? 18 + (rand() - 0.3) * 1.4 : h + 0.5 + rand() * 1.5
     return Math.max(600, (until - h) * 3600)
   }
+
+  // ---- 住户 ----
+  /** 一栋住宅楼里参与仿真的住户数: 建筑面积 / 45㎡ 每人，再乘缩放 */
+  residentsOf(area, floors) { return Math.max(4, Math.round(((area * floors) / 45) * this.residentScale)) }
+  get #dayKey() { return this.rest ? 'rest' : 'workday' }
+  homeDepartRate() { return lerpCurve(HOME_DEPART[this.#dayKey], this.clock.hour) }
+  homeReturnRate() { return lerpCurve(HOME_RETURN[this.#dayKey], this.clock.hour) }
+  homeFraction() { return lerpCurve(HOME_FRACTION[this.#dayKey], this.clock.hour) }
+
+  /** 这会儿出门的住户是哪类人: 工作日早上主要是上班族，其余时间老人和年轻人多 */
+  residentGroup(rand) {
+    const r = rand(), commuteHours = !this.rest && this.clock.hour < 9.5
+    return commuteHours ? (r < 0.7 ? 0 : r < 0.9 ? 1 : 2) : r < 0.25 ? 0 : r < 0.65 ? 1 : 2
+  }
+
+  /** 出门后直接离开核心区（去别处上班 / 办事）的概率；否则就在核心区里活动 */
+  commuteOutProb(gi) { return !this.rest && this.clock.hour < 10 && gi === 0 ? 0.8 : 0.15 }
 
   /** 给界面用: 正在进行和接下来的场次 */
   upcoming(n = 3) {

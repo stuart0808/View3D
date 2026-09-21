@@ -80,6 +80,7 @@ const onReady = (engine) => (window.__city = engine)
   </div>
   <div v-if="stats && (stats.groups || stats.events.length)" class="debug-bar info-bar">
     <span v-for="g in stats.groups || []" :key="g.id" class="stat">{{ g.label }} {{ g.active }}</span>
+    <span v-if="stats.residents" class="stat">· 住户 在家 {{ stats.residents.home }} / 在核心区活动 {{ stats.residents.out }} / 外出 {{ stats.residents.away }}</span>
     <span v-for="ev in stats.events" :key="ev.start + ev.venue" class="stat">
       · {{ ev.venueName }} {{ ev.time }} {{ ev.title }}（{{ { scheduled: '未开始', ingress: '进场中', live: '进行中', egress: '散场中' }[ev.phase] }}，约 {{ ev.realAttendance }} 人）
     </span>
