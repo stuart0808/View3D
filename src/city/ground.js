@@ -299,7 +299,7 @@ export function buildBackdrop(scene, style, rand) {
   const ang = scene.angle || 0
   const ca = Math.cos(ang), sa = Math.sin(ang)
   const bg = new THREE.Color(style.background), tint = new THREE.Color(style.backdrop)
-  const step = Math.max(70, R * 0.55)
+  const step = Math.min(240, Math.max(70, R * 0.55)) // 场景再大，背景楼块也保持楼的尺度
   const range = Math.ceil((R * 3.4) / step)
   const geos = []
   const col = new THREE.Color()

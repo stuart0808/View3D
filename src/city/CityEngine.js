@@ -174,16 +174,32 @@ export class CityEngine {
     this._resize()
     this.controls.update()
 
-    // 太阳从左后方打过来，影子落向右前；阴影相机刚好包住地块
+    this._shadowKey = ''
+    this.#updateShadow()
+  }
+
+  /**
+   * 阴影相机跟着视野走: 只包住当前看得见的范围（不超过整个场景）。
+   * 城区有几公里宽，一张 4096 的阴影贴图铺满全城的话每像素 0.7m，影子全是糊的；拉近看街区时自动变清晰。
+   */
+  #updateShadow() {
+    const t = this.controls.target
+    const view = ((this.camera.top * 2) / this.camera.zoom) * Math.max(1, this.camera.right / this.camera.top)
+    const r = Math.min(this.sceneRadius * 1.15, Math.max(140, view * 0.8))
+    const q = r / 6 // 位置按 r/6 取整: 视角小幅移动时不用每帧重设，影子也不会抖
+    const key = `${Math.round(t.x / q)},${Math.round(t.z / q)},${Math.round(Math.log2(r) * 3)}`
+    if (key === this._shadowKey) return
+    this._shadowKey = key
+    const cx = Math.round(t.x / q) * q, cz = Math.round(t.z / q) * q
+    // 太阳从左后方打过来，影子落向右前
     this.sun.target.position.set(cx, 0, cz)
-    this.sun.position.set(cx - radius * 0.9, radius * 1.5, cz + radius * 0.35)
+    this.sun.position.set(cx - r * 0.9, r * 1.5, cz + r * 0.35)
     const sc = this.sun.shadow.camera
-    sc.left = sc.bottom = -radius * 1.15
-    sc.right = sc.top = radius * 1.15
+    sc.left = sc.bottom = -r
+    sc.right = sc.top = r
     sc.near = 1
-    sc.far = radius * 4
+    sc.far = r * 4
     sc.updateProjectionMatrix()
-    this.sun.shadow.needsUpdate = true
   }
 
   // -------------------------------------------------------------------------
@@ -406,6 +422,7 @@ export class CityEngine {
       if (f.t >= 1) this.fly = null
     }
     this.controls.update()
+    if (this.world) this.#updateShadow()
     this.renderer.render(this.scene, this.camera)
     this.frame++
   }

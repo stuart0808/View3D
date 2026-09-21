@@ -149,7 +149,7 @@ function addFacades(b, h, nav, rand, glass, signs, frames) {
   const up = new THREE.Vector3(0, 1, 0)
   const q = new THREE.Quaternion()
   const n = poly.length
-  const isShop = b.kind !== 'block'
+  const isShop = b.kind === 'shop'
   let theme = SHOP_THEMES[(rand() * SHOP_THEMES.length) | 0]
   let themeLeft = 0
 
@@ -162,6 +162,7 @@ function addFacades(b, h, nav, rand, glass, signs, frames) {
     const [nx, ny] = edgeNormal(poly, i, area)
     const mx = (p[0] + p1[0]) / 2, my = (p[1] + p1[1]) / 2
     const frontage = nav.isWalkable(mx + nx * 2.5, my + ny * 2.5) || nav.isWalkable(mx + nx * 4, my + ny * 4)
+    const far = !nav.contains(mx, my) // 核心区以外: 不知道哪面临街，也没人走近看，统一画窗带
     const tx = ex / L, ty = ey / L
     // 盒子的局部 X 沿墙、Z 朝外
     q.setFromAxisAngle(up, Math.atan2(-ty, tx))
@@ -190,7 +191,7 @@ function addFacades(b, h, nav, rand, glass, signs, frames) {
       for (let f = 1; f < (b.floors || 2); f++) {
         place(glass, start + usable / 2, f * FLOOR_H + 2.1, usable, 1.3, 0.1, 0.03, '#9fb3c4')
       }
-    } else if (!isShop) {
+    } else if (!isShop || far) {
       for (let f = 0; f < (b.floors || 2); f++) {
         place(glass, start + usable / 2, f * FLOOR_H + 2.3, usable, 1.9, 0.1, 0.03, '#93a9bd')
       }

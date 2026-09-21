@@ -57,6 +57,7 @@ export class Crowd {
     this.phase = new Float32Array(n)
     this.scale = new Float32Array(n)
     this.hx = new Float32Array(n); this.hy = new Float32Array(n) // 在店内时的热力落点
+    this.door = new Uint8Array(n) // 进的是这栋楼的第几扇门
     this.ex = new Float32Array(n); this.ey = new Float32Array(n) // 出门后先走到的门外落脚点
     this.heatSamples = new Float32Array(n * 3)
     this.heatCount = 0
@@ -89,12 +90,19 @@ export class Crowd {
       })
     }
 
+    // 目的地按「楼」建，而不是按「门」: 一栋楼的所有门共用一张多源距离场，人自然会走向离自己最近的那扇门。
+    // 城区里几百扇门，每扇门一张场的话内存和预热时间都撑不住。
     this.dests = []
+    const byBuilding = new Map()
     for (const d of scene.doors || []) {
       if (!byId.has(d.building)) continue
       const cell = nav.nearestWalkable(d.pos[0] + d.normal[0] * 1.6, d.pos[1] + d.normal[1] * 1.6, 8)
       if (cell < 0) continue
-      this.dests.push({ type: 'door', building: d.building, x: d.pos[0], y: d.pos[1], cell, c: nav.center(cell), field: null, share: 1 / doorCount.get(d.building), weight: 0 })
+      if (!byBuilding.has(d.building)) byBuilding.set(d.building, [])
+      byBuilding.get(d.building).push({ x: d.pos[0], y: d.pos[1], cell, c: nav.center(cell) })
+    }
+    for (const [id, doors] of byBuilding) {
+      this.dests.push({ type: 'door', building: id, kind: byId.get(id).kind, doors, cells: doors.map((q) => q.cell), x: doors[0].x, y: doors[0].y, c: doors[0].c, field: null, weight: 0 })
     }
     for (const p of scene.portals || []) {
       const cell = nav.nearestWalkable(p.pos[0], p.pos[1], 25)
@@ -123,7 +131,7 @@ export class Crowd {
     for (const d of this.dests) {
       if (d.type !== 'door') continue
       const b = this.buildings.get(d.building)
-      d.weight = b.attraction * (b.area / 1000) * d.share
+      d.weight = b.attraction * (b.area / 1000)
     }
   }
 
@@ -150,11 +158,11 @@ export class Crowd {
   }
 
   /** 每帧花几毫秒算距离场，算完之前不出人，避免首帧卡死 */
-  #warmup(budgetMs = 7) {
+  #warmup(budgetMs = 12) {
     const t0 = performance.now()
     while (this.pendingFields.length && performance.now() - t0 < budgetMs) {
       const i = this.pendingFields.pop()
-      this.dests[i].field = this.nav.buildField(this.dests[i].cell)
+      this.dests[i].field = this.nav.buildField(this.dests[i].cells || this.dests[i].cell)
     }
     if (this.pendingFields.length) return false
     // 预热: 直接把人撒在半路上，开场就是热闹的
@@ -229,6 +237,9 @@ export class Crowd {
       this.timer[i] = (8 + this.rand() * 25) * 60 * this.dwellScale // 在公园/广场歇 8~33 分钟
       return
     }
+    let best = 0, bd = Infinity
+    d.doors.forEach((q, k) => { const dd = (q.x - this.x[i]) ** 2 + (q.y - this.y[i]) ** 2; if (dd < bd) { bd = dd; best = k } })
+    this.door[i] = best
     this.state[i] = ENTER
     this.timer[i] = 0.45
   }
@@ -243,14 +254,16 @@ export class Crowd {
       this.insideCount--
     }
     this.stops[i] = Math.max(0, this.stops[i] - 1)
-    const next = this.stops[i] > 0 ? this.#pick(this.doors, d.c[0], d.c[1], this.dest[i]) : this.#pick(this.portals, d.c[0], d.c[1])
+    const from = wasInside ? d.doors[this.door[i]].c : d.c
+    const next = this.stops[i] > 0 ? this.#pick(this.doors, from[0], from[1], this.dest[i]) : this.#pick(this.portals, from[0], from[1])
     if (next < 0) { this.state[i] = FREE; this.active--; return }
     this.dest[i] = next
     if (!wasInside) { this.state[i] = WALK; return }
     this.state[i] = EXIT
     this.timer[i] = 0.45
-    this.x[i] = d.x; this.y[i] = d.y
-    this.ex[i] = d.c[0]; this.ey[i] = d.c[1]
+    const dq = d.doors[this.door[i]]
+    this.x[i] = dq.x; this.y[i] = dq.y
+    this.ex[i] = dq.c[0]; this.ey[i] = dq.c[1]
   }
 
   /** 手动跳时间之后: 清空所有人，按当前目标人数重新撒一遍 */
@@ -314,7 +327,8 @@ export class Crowd {
       }
       if (s === ENTER || s === EXIT) {
         this.timer[i] -= dt
-        const tx = s === ENTER ? d.x : this.ex[i], ty = s === ENTER ? d.y : this.ey[i]
+        const dq = d.doors ? d.doors[this.door[i]] : d
+        const tx = s === ENTER ? dq.x : this.ex[i], ty = s === ENTER ? dq.y : this.ey[i]
         x[i] += (tx - x[i]) * Math.min(1, dt * 6)
         y[i] += (ty - y[i]) * Math.min(1, dt * 6)
         this.scale[i] = THREE.MathUtils.clamp(s === ENTER ? this.timer[i] / 0.45 : 1 - this.timer[i] / 0.45, 0, 1)
@@ -384,14 +398,15 @@ export class Crowd {
     b.visitors++
     this.insideCount++
     // 热力落点: 取几个候选内点里离这扇门最近的，热区就会聚在对应店面后面
+    const dq = d.doors[this.door[i]]
     let best = null, bestD = Infinity
     for (let t = 0; t < 4 && b.interior.length; t++) {
       const p = b.interior[(this.rand() * b.interior.length) | 0]
-      const dd = (p[0] - d.x) ** 2 + (p[1] - d.y) ** 2
+      const dd = (p[0] - dq.x) ** 2 + (p[1] - dq.y) ** 2
       if (dd < bestD) { bestD = dd; best = p }
     }
-    this.hx[i] = best ? best[0] : d.x
-    this.hy[i] = best ? best[1] : d.y
+    this.hx[i] = best ? best[0] : dq.x
+    this.hy[i] = best ? best[1] : dq.y
   }
 
   #pickPortal() {

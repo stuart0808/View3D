@@ -868,14 +868,16 @@ def main():
             return max(edge_w[i] for i, _ in others) / 2
 
         # 桥下的路: 中心线大部分压在高架下面。桥面正下方是桥墩和隔离带，不走车，前端据此把车道排在桥面投影两侧
-        deck_half = float(cv2.distanceTransform(emask, cv2.DIST_L2, 5).max()) * mpp if emask.any() else 0.0
+        edt_deck = cv2.distanceTransform(emask, cv2.DIST_L2, 5) if emask.any() else None
 
         def under_deck(pts):
-            if deck_half <= 0:
+            """返回这条路头顶桥面的半宽（米），不在桥下返回 0。取沿线的中位数: 高架交叉口、弯角处掩膜局部很宽，不能用全局最大值"""
+            if edt_deck is None:
                 return 0.0
             ix = np.clip(pts[:, 0].round().astype(int), 0, W - 1)
             iy = np.clip(pts[:, 1].round().astype(int), 0, H - 1)
-            return round(deck_half, 2) if (emask[iy, ix] > 0).mean() > 0.6 else 0.0
+            inside = emask[iy, ix] > 0
+            return round(float(np.median(edt_deck[iy, ix][inside])) * mpp, 2) if inside.mean() > 0.6 else 0.0
 
         ring_nodes = set()
         for a, b, pts in edges:

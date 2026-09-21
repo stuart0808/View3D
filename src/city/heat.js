@@ -4,7 +4,7 @@ import { hiddenBuilding } from './buildings.js'
 
 export class HeatLayer {
   constructor(scene, geometry, { metersPerPixel = 1.5 } = {}) {
-    const b = scene.bounds
+    const b = scene.activeRegion || scene.bounds // 热力只来自逐人仿真的区域
     this.minX = b.minX
     this.minY = b.minY
     this.mpp = metersPerPixel

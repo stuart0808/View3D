@@ -9,7 +9,8 @@ const WALKABLE_SURFACES = new Set([SURFACE.PAVE, SURFACE.PARKING, SURFACE.PARK, 
 
 export class NavGrid {
   constructor(scene, { cell = 1.0, maxCells = 200000 } = {}) {
-    const b = scene.bounds
+    // 城区级的场景只在核心区（activeRegion）里逐人仿真，导航网格也只铺这一块；没有就铺满全场景
+    const b = scene.activeRegion || scene.bounds
     const pad = 4
     this.minX = b.minX - pad
     this.minY = b.minY - pad
@@ -135,6 +136,9 @@ export class NavGrid {
     return [this.minX + ((k % this.cols) + 0.5) * this.cell, this.minY + (Math.floor(k / this.cols) + 0.5) * this.cell]
   }
 
+  /** (x,y) 在不在导航网格覆盖的范围里 */
+  contains(x, y) { return this.index(x, y) >= 0 }
+
   isWalkable(x, y) {
     const k = this.index(x, y)
     return k >= 0 && this.walkable[k] === 1
@@ -161,8 +165,8 @@ export class NavGrid {
     return -1
   }
 
-  /** 从目标格出发的 Dijkstra 距离场（Uint16，单位 0.1m） */
-  buildField(targetIndex) {
+  /** 从目标格（可以是多个: 一栋楼的所有门）出发的 Dijkstra 距离场（Uint16，单位 0.1m） */
+  buildField(targets) {
     const { cols, rows, walkable, penalty, cell } = this
     const N = cols * rows
     const dist = new Float64Array(N).fill(Infinity) // 必须 64 位: 堆里的键是 double，32 位舍入后会把有效条目误判成过期
@@ -197,8 +201,7 @@ export class NavGrid {
       return top
     }
 
-    dist[targetIndex] = 0
-    push(0, targetIndex)
+    for (const t of Array.isArray(targets) ? targets : [targets]) { dist[t] = 0; push(0, t) }
     const DX = [1, -1, 0, 0, 1, 1, -1, -1], DY = [0, 0, 1, -1, 1, -1, 1, -1]
     while (heapK.length) {
       const dTop = heapK[0]

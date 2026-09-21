@@ -5,6 +5,8 @@ import CityScene from './components/CityScene.vue'
 // 角落里这一小条只是调试用的开关，正式接入时删掉即可，CityScene 本身不带任何 UI。
 // ?scene=xxx 可切换 public/scenes/xxx.json
 const sceneName = new URLSearchParams(location.search).get('scene') || 'demo'
+const SCENES = [{ id: 'demo', t: '街区' }, { id: 'district', t: '城区' }]
+const gotoScene = (id) => (location.search = '?scene=' + id)
 const heat = ref(true)
 const base = ref(600)
 // 人数、车流、昼夜都由仿真时钟驱动（src/city/clock.js）。这里只是把时钟显示出来，给几个「跳到某个时刻」的演示按钮
@@ -66,6 +68,7 @@ const onReady = (engine) => (window.__city = engine)
     @select="onSelect"
   />
   <div class="debug-bar">
+    <button v-for="sc in SCENES" :key="sc.id" :class="{ on: sceneName === sc.id }" @click="gotoScene(sc.id)">{{ sc.t }}</button>
     <span v-if="stats" class="clock">{{ stats.clock.date }} · <b>{{ stats.clock.dayType }}</b> · {{ stats.clock.time }}</span>
     <button v-for="r in RATES" :key="r.v" :class="{ on: rate === r.v }" @click="setRate(r.v)">{{ r.t }}</button>
     <button v-for="j in JUMPS" :key="j.t" @click="j.f(city.clock())">{{ j.t }}</button>

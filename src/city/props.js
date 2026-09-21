@@ -99,7 +99,9 @@ function areaTreeSpots(scene, rand) {
 }
 
 export function buildTrees(scene, nav, rand) {
-  const spots = [...streetTreeSpots(scene, nav), ...areaTreeSpots(scene, rand)]
+  let spots = [...streetTreeSpots(scene, nav), ...areaTreeSpots(scene, rand)]
+  const MAX_TREES = 6000 // 城区级场景的绿地很多，超了就均匀抽稀
+  if (spots.length > MAX_TREES) { const keep = MAX_TREES / spots.length; spots = spots.filter(() => rand() < keep) }
   const mesh = new THREE.InstancedMesh(treeGeometry(), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, flatShading: true }), Math.max(1, spots.length))
   mesh.name = 'trees'
   mesh.count = spots.length

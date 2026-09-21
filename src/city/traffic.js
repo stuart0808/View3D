@@ -60,7 +60,7 @@ export class Traffic {
   #buildWays(scene) {
     const g = scene.roadGraph || { nodes: {}, edges: [] }
     this.nodes = {}
-    for (const [id, n] of Object.entries(g.nodes)) this.nodes[id] = { ...n, busy: null, out: [], inn: [] }
+    for (const [id, n] of Object.entries(g.nodes)) this.nodes[id] = { ...n, busy: null, out: [], inn: [], turning: [] } // turning: 此刻正在这个路口里的车
     this.ways = []
     this.laneSeq = 0
     this.turnPaths = new Map()
@@ -355,28 +355,35 @@ export class Traffic {
 
   /** 出入口的压路沿车道（盖在人行道上的一条沥青）+ 车库门洞 */
   #buildDecor(driveways) {
-    const asphalt = new THREE.MeshStandardMaterial({ color: '#6a6f77', roughness: 0.95 })
-    const dark = new THREE.MeshStandardMaterial({ color: '#1e2228', roughness: 0.9 })
+    // 城区里有上百个出入口，逐个建 Mesh 会多出上百个 draw call，合并成两个
+    const strips = [], doors = []
     for (const [entry, gate] of driveways) {
       const side = gate.lane.way.laneW / 2 // 车道中心 → 右侧路沿
       const end = [gate.point[0] - gate.dy * side, gate.point[1] + gate.dx * side]
       const dx = end[0] - entry[0], dy = end[1] - entry[1], L = Math.hypot(dx, dy)
       if (L < 0.5) continue
-      const strip = new THREE.Mesh(new THREE.BoxGeometry(L, 0.02, 5.6), asphalt)
-      strip.position.set((entry[0] + end[0]) / 2, CURB_H + 0.012, (entry[1] + end[1]) / 2)
-      strip.rotation.y = Math.atan2(-dy, dx)
-      strip.receiveShadow = true
-      this.decor.add(strip)
+      const g = new THREE.BoxGeometry(L, 0.02, 5.6).toNonIndexed()
+      g.rotateY(Math.atan2(-dy, dx))
+      g.translate((entry[0] + end[0]) / 2, CURB_H + 0.012, (entry[1] + end[1]) / 2)
+      strips.push(g)
     }
     for (const f of this.garages) {
-      const door = new THREE.Mesh(new THREE.BoxGeometry(0.5, 3.0, 5.6), dark)
-      door.position.set(f.entry[0] + f.normal[0] * 0.12, CURB_H + 1.5, f.entry[1] + f.normal[1] * 0.12)
-      door.rotation.y = Math.atan2(-f.normal[1], f.normal[0])
-      this.decor.add(door)
+      const g = new THREE.BoxGeometry(0.5, 3.0, 5.6).toNonIndexed()
+      g.rotateY(Math.atan2(-f.normal[1], f.normal[0]))
+      g.translate(f.entry[0] + f.normal[0] * 0.12, CURB_H + 1.5, f.entry[1] + f.normal[1] * 0.12)
+      doors.push(g)
     }
+    const add = (geos, color) => {
+      if (!geos.length) return
+      const mesh = new THREE.Mesh(mergeGeometries(geos), new THREE.MeshStandardMaterial({ color, roughness: 0.95 }))
+      mesh.receiveShadow = true
+      this.decor.add(mesh)
+    }
+    add(strips, '#6a6f77')
+    add(doors, '#1e2228')
   }
 
-  garageInfo(buildingId) {
+    garageInfo(buildingId) {
     const f = this.garages.find((g) => g.building === buildingId)
     return f ? { capacity: f.capacity, occupied: f.occupied, entry: f.entry, normal: f.normal } : null
   }
@@ -386,12 +393,13 @@ export class Traffic {
   // -------------------------------------------------------------------------
   #newCar() {
     const car = {
-      mode: 'lane', lane: null, s: 0, v: 0, level: 0, move: 'S', rtor: false, x: 0, y: 0, dx: 1, dy: 0, scale: 1, wait: 0, push: 0, nextWay: null, nextPlan: null, parkAt: null,
+      id: (this.carSeq = (this.carSeq || 0) + 1), mode: 'lane', lane: null, s: 0, v: 0, level: 0, move: 'S', rtor: false, x: 0, y: 0, dx: 1, dy: 0, scale: 1, wait: 0, push: 0, nextWay: null, nextPlan: null, parkAt: null,
       color: CAR_COLORS[(this.rand() * CAR_COLORS.length) | 0], vmax: V_MAX * (this.rand() < 0.2 ? 0.5 + this.rand() * 0.15 : 0.85 + this.rand() * 0.3), // 两成是慢车
       lat: 0, ghost: null, homeK: -1, passing: null,
     }
     this.cars.push(car)
     this.colorsDirty = true
+    this._rc = -1
     return car
   }
 
@@ -488,14 +496,16 @@ export class Traffic {
   setDemand(f) { this.target = Math.round(this.baseTarget * Math.max(0.12, f)) }
 
   get roadCount() {
+    if (this._rc >= 0) return this._rc
     let n = 0
     for (const c of this.cars) if (c.mode === 'lane' || c.mode === 'turn' || c.mode === 'ramp') n++
-    return n
+    return (this._rc = n)
   }
 
   /** dt = 仿真秒；write=false 时不写实例矩阵（一帧多个子步，只有最后一步要写） */
   update(dt, write = true) {
     if (!this.ways.length) return
+    this._rc = -1 // 路上车数每个子步只数一次
     // 出图的车从入口补回来
     if (this.entries.length && this.roadCount < this.target) {
       const plan = this.#plan(this.entries[(this.rand() * this.entries.length) | 0])
@@ -574,8 +584,8 @@ export class Traffic {
       // 从本车道进路口的前车还没走出一个车身: 它已经不在车道的列表里了，要单独看，否则会跟着开到同一个点上
       // 能停在停车线后就停在线后；车头已经过线的（绿灯尾巴上进来的）就停在车道尽头，总之不带着冲突进路口
       if (toEnd < 30 && this.#boxConflict(car, lane)) limit(toLine > 0 ? toLine : toEnd - 0.3, 'boxConflict')
-      for (const o of this.cars) {
-        if (o.mode !== 'turn' || o.turn.from !== lane) continue
+      for (const o of node.turning) {
+        if (o.turn.from !== lane) continue
         limit(toEnd + o.turn.u * o.turn.len - CAR_LEN - 2.2, 'boxFull') // 和它保持一个车身 + 2.2m，和车道内跟车一样
       }
       let blocked = entryFull ? 'entryFull' : ''
@@ -720,8 +730,8 @@ export class Traffic {
    */
   #boxConflict(car, lane) {
     const mine = this.#turnPath(lane, car.nextPlan.lane).samples
-    for (const o of this.cars) {
-      if (o === car || o.mode !== 'turn' || o.turn.node !== lane.way.to || o.turn.from === lane) continue
+    for (const o of this.nodes[lane.way.to].turning) {
+      if (o === car || o.turn.from === lane) continue
       const theirs = o.turn.path.samples
       const k0 = Math.max(0, Math.floor(o.turn.u * (theirs.length - 1)) - 1)
       for (let i = k0; i < theirs.length; i++) {
@@ -740,6 +750,7 @@ export class Traffic {
     car.mode = 'turn'
     car.turn = { ...path, path, u: 0, node: a.way.to, fromRing: a.way.roundabout, from: a }
     this.nodes[a.way.to].busy = car
+    this.nodes[a.way.to].turning.push(car)
   }
 
   #updateTurn(car, dt) {
@@ -775,10 +786,10 @@ export class Traffic {
     //    · 要并入同一条出口车道的: 不管从哪个方向来，都按次序排队，保持一个车身的间距（否则会同时挤进车道入口叠在一起）
     //    · 轨迹交叉的: 对方就在车头前方 7m 内且次序靠前 → 停下等它过去
     const myRem = (1 - t.u) * t.len
-    for (const o of this.cars) {
-      if (o === car || o.mode !== 'turn' || o.turn.node !== t.node) continue
+    for (const o of this.nodes[t.node].turning) {
+      if (o === car) continue
       const oRem = (1 - o.turn.u) * o.turn.len
-      if (!(oRem < myRem || (oRem === myRem && this.cars.indexOf(o) < this.cars.indexOf(car)))) continue
+      if (!(oRem < myRem || (oRem === myRem && o.id < car.id))) continue
       if (o.nextPlan.lane === car.nextPlan.lane) {
         const g = myRem - oRem - CAR_LEN - 2.2
         want = Math.min(want, Math.sqrt(Math.max(0, 6 * g)))
@@ -796,6 +807,7 @@ export class Traffic {
     if (t.u >= 1) {
       const node = this.nodes[t.node]
       if (node.busy === car) node.busy = null
+      node.turning.splice(node.turning.indexOf(car), 1)
       const plan = car.nextPlan
       return this.#enterLane(car, plan.lane, plan.nextWay, 0, plan.ramp)
     }
@@ -810,7 +822,7 @@ export class Traffic {
       if (!w.roundabout) continue
       for (const l of w.lanes) if (l.cars.some((c) => l.len - c.s < 16)) return true
     }
-    return this.cars.some((c) => c.mode === 'turn' && c.turn.node === nodeId && c.turn.fromRing)
+    return this.nodes[nodeId].turning.some((c) => c.turn.fromRing)
   }
 
   #updateRamp(car, dt) {
