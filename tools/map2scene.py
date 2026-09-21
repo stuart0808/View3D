@@ -94,7 +94,9 @@ def classify(img, markers, tol, min_sat=70):
     h, w = img.shape[:2]
     best = np.full((h, w), -1, np.int16)
     cols = [np.array(hex_to_rgb(m["color"]), np.int32) for m in markers]
-    for y0 in range(0, h, 512):  # 按行分块: 几千万像素的城区图一次算完要吃好几个 G 内存
+    # 按行分块。实测 4800x3400 (1632 万像素): 不分块峰值 832MB / 7.2s，分块 153MB / 8.1s，结果逐像素一致。
+    # 这个尺寸其实不分块也行；占用和像素数成正比，上亿像素（同样范围用 0.2 m/px 画）时不分块要 5GB 以上，所以留着
+    for y0 in range(0, h, 512):
         rgb = img[y0:y0 + 512, :, 2::-1].astype(np.int32)
         b_ = best[y0:y0 + 512]
         best_d = np.full(rgb.shape[:2], tol * tol, np.int32)
