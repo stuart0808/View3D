@@ -19,13 +19,32 @@ npm run dev            # http://localhost:5173/          示例场景
 
 操作：左键拖动旋转、右键拖动平移、滚轮缩放；**点击一栋楼**进入室内视图（商场一层 / 地下车库 B1），Esc 退出。
 
+## 两个示例场景
+
+| | 街区 `?scene=demo` | 城区 `?scene=district` |
+|---|---|---|
+| 范围 | 600m × 440m，0.2 m/px | 2.4km × 1.7km，0.5 m/px（中央嵌着街区） |
+| 生成 | `make_demo_map.py` | `make_district_map.py`（另出一个 sidecar json） |
+| 内容 | 环路、主干路 + 高架 + 匝道、环岛、商铺 / 公园 / 停车场 | 环形高架、三条地铁、一条斜向高架铁路、体育场、大剧院、住宅 / 写字楼 / 商业地块 |
+
+底栏：仿真速度（1×~120×，人和车真的按这个倍速运动）、跳到早晚高峰 / 下个周末 / 下个节假日 / 下一场活动。
+顶栏：各人群实时人数、场馆场次状态。时间系统、时刻表、人群作息分别在 `src/city/clock.js`、`transit.js`、`demand.js`，
+里面的曲线和表格就是接真实数据时要替换的地方。
+
+```bash
+python tools/make_district_map.py tools/samples
+python tools/map2scene.py tools/samples/district_marked.png --sidecar tools/samples/district.sidecar.json     -o public/scenes/district.json --mpp 0.5 --debug tools/samples/district_preview.png     # 约 40 秒
+```
+
 ## 标记约定
 
 | 颜色 | 含义 | 画法 |
 |---|---|---|
 | 红 `#FF0000` | 商铺建筑（2 层） | 填充色块 |
 | 橙 `#FF8000` | 商铺建筑（1 层） | 填充色块 |
-| 品红 `#FF00FF` | 非商铺 / 高楼（5 层，无店面） | 填充色块 |
+| 品红 `#FF00FF` | 写字楼 / 非商铺高楼（6~28 层，按占地自动取） | 填充色块 |
+| 春绿 `#00FF80` | 住宅楼（9~18 层） | 填充色块 |
+| 黄绿 `#80FF00` | 活动场馆（体育场、剧院…） | 填充色块，形状随意；名称 / 类型 / 容量写在 sidecar 里 |
 | 蓝 `#0000FF` | 车行道（环岛画成圆环即可，自动识别） | 填充色块 |
 | 玫红 `#FF0080` | 高架路 | 填充色块，直接盖在地面道路上画，两端通到图外 |
 | 绿 `#00FF00` | 绿化带 / 草坪（不可走，自动种树） | 填充色块 |
@@ -119,6 +138,9 @@ python tools/map2scene.py 标记图.png -o public/scenes/my.json --width-m 600 -
 | `src/city/props.js` | 行道树/绿地树、停车位布局、车模型 |
 | `src/city/interior.js` | 商场一层 / 地下车库 B1 的程序化室内 |
 | `src/city/heat.js` | 店内人数 → 密度纹理 → 屋顶色带 |
+| `src/city/clock.js` | 仿真时钟 + 日历（工作日 / 周末 / 节假日），全城唯一的时间来源 |
+| `src/city/demand.js` | 人群分组的出现曲线与活动偏好、场馆活动排期 |
+| `src/city/transit.js` | 地铁 / 铁路：线路与车站网格、两套时刻表、列车运行、到站客流 |
 
 性能参考（示例城区，集显笔记本）：600 人 + 约 270 辆车（含停着的）、约 50 个 draw call、40 万三角面，60fps。
 
