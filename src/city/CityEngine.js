@@ -56,6 +56,11 @@ export class CityEngine {
     this.controls.maxPolarAngle = THREE.MathUtils.degToRad(78)
     this.controls.minPolarAngle = THREE.MathUtils.degToRad(5)
     this.controls.screenSpacePanning = false
+    this.controls.zoomToCursor = true
+    // 鼠标: 左键旋转 / 右键(或 Ctrl+左键)平移 / 滚轮缩放；触屏: 单指旋转、双指平移+缩放
+    this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }
+    this.keys = new Set()
+    this.#bindKeys()
 
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0xaab4c2, 1.15))
     this.sun = new THREE.DirectionalLight(0xfff6ea, 2.1)
@@ -171,6 +176,65 @@ export class CityEngine {
     sc.far = radius * 4
     sc.updateProjectionMatrix()
     this.sun.shadow.needsUpdate = true
+  }
+
+  // -------------------------------------------------------------------------
+  // 视角: 旋转 / 平移 / 缩放（键盘和外部按钮共用这几个方法）
+  // -------------------------------------------------------------------------
+  /** 绕目标点水平转 dAz、俯仰转 dEl（弧度）。俯仰限制在 5°~78° */
+  orbit(dAz, dEl = 0) {
+    const off = this.camera.position.clone().sub(this.controls.target)
+    const sph = new THREE.Spherical().setFromVector3(off)
+    sph.theta += dAz
+    sph.phi = THREE.MathUtils.clamp(sph.phi - dEl, this.controls.minPolarAngle, this.controls.maxPolarAngle)
+    this.camera.position.copy(this.controls.target).add(off.setFromSpherical(sph))
+    this.controls.update()
+  }
+
+  /** 沿屏幕的 右/上 方向在地面上平移（单位: 米） */
+  pan(right, up) {
+    const az = Math.atan2(this.camera.position.x - this.controls.target.x, this.camera.position.z - this.controls.target.z)
+    const dx = Math.cos(az) * right - Math.sin(az) * up, dz = -Math.sin(az) * right - Math.cos(az) * up
+    this.controls.target.x += dx; this.controls.target.z += dz
+    this.camera.position.x += dx; this.camera.position.z += dz
+    this.controls.update()
+  }
+
+  zoomBy(factor) {
+    this.camera.zoom = THREE.MathUtils.clamp(this.camera.zoom * factor, this.controls.minZoom, this.controls.maxZoom)
+    this.camera.updateProjectionMatrix()
+  }
+
+  resetView() {
+    if (this.sceneData) this.#frameScene(this.sceneData.bounds)
+  }
+
+  #bindKeys() {
+    const el = this.renderer.domElement
+    el.tabIndex = 0
+    el.style.outline = 'none'
+    el.addEventListener('pointerdown', () => el.focus())
+    el.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase()
+      if (k === 'home' || k === '0') return this.resetView()
+      if (['w', 'a', 's', 'd', 'q', 'e', 'r', 'f', '+', '=', '-', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) { this.keys.add(k); e.preventDefault() }
+    })
+    el.addEventListener('keyup', (e) => this.keys.delete(e.key.toLowerCase()))
+    el.addEventListener('blur', () => this.keys.clear())
+  }
+
+  /** 按住键持续运动: WASD/方向键平移，Q/E 旋转，R/F 俯仰，+/- 缩放，Home 或 0 复位 */
+  #applyKeys(dt) {
+    const K = this.keys
+    if (!K.size) return
+    const speed = ((this.camera.top * 2) / this.camera.zoom) * 0.9 * dt // 每秒移动约 0.9 个屏高
+    const h = (K.has('d') || K.has('arrowright') ? 1 : 0) - (K.has('a') || K.has('arrowleft') ? 1 : 0)
+    const v = (K.has('w') || K.has('arrowup') ? 1 : 0) - (K.has('s') || K.has('arrowdown') ? 1 : 0)
+    if (h || v) this.pan(h * speed, v * speed)
+    const rot = (K.has('e') ? 1 : 0) - (K.has('q') ? 1 : 0), tilt = (K.has('r') ? 1 : 0) - (K.has('f') ? 1 : 0)
+    if (rot || tilt) this.orbit(rot * dt * 1.4, tilt * dt * 0.9)
+    const z = (K.has('+') || K.has('=') ? 1 : 0) - (K.has('-') ? 1 : 0)
+    if (z) this.zoomBy(Math.exp(z * dt * 1.4))
   }
 
   // -------------------------------------------------------------------------
@@ -290,6 +354,7 @@ export class CityEngine {
       const id = this.interior.buildingId
       this.interior.update(dt * this.timeScale, this.interior.kind === 'garage' ? this.traffic?.garageInfo(id) : this.crowd?.buildings.get(id)?.visitors)
     }
+    this.#applyKeys(dt)
     if (this.fly) {
       const f = this.fly
       f.t = Math.min(1, f.t + dt / 0.6)

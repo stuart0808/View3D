@@ -71,6 +71,10 @@ watch(() => props.attraction, (v) => v && engine?.setAttraction(v), { deep: true
 defineExpose({
   getEngine: () => engine,
   showInterior: (id, kind) => engine?.showInterior(id, kind),
+  orbit: (dAz, dEl) => engine?.orbit(dAz, dEl),
+  pan: (r, u) => engine?.pan(r, u),
+  zoomBy: (f) => engine?.zoomBy(f),
+  resetView: () => engine?.resetView(),
   hideInterior: () => engine?.hideInterior(),
 })
 </script>

@@ -35,6 +35,17 @@ function leave() {
   city.value.hideInterior()
 }
 window.addEventListener('keydown', (e) => e.key === 'Escape' && picked.value && leave())
+
+// 视角按钮（鼠标: 左键旋转 / 右键平移 / 滚轮缩放；键盘: WASD 平移、Q/E 旋转、R/F 俯仰、+/- 缩放、Home 复位）
+const NAV = [
+  { t: '⟲', tip: '向左旋转 (Q)', f: () => city.value.orbit(-Math.PI / 8) },
+  { t: '⟳', tip: '向右旋转 (E)', f: () => city.value.orbit(Math.PI / 8) },
+  { t: '▲', tip: '抬高视角 (R)', f: () => city.value.orbit(0, Math.PI / 18) },
+  { t: '▼', tip: '压低视角 (F)', f: () => city.value.orbit(0, -Math.PI / 18) },
+  { t: '+', tip: '放大 (+)', f: () => city.value.zoomBy(1.35) },
+  { t: '−', tip: '缩小 (-)', f: () => city.value.zoomBy(1 / 1.35) },
+  { t: '⌂', tip: '复位 (Home)', f: () => city.value.resetView() },
+]
 // 方便在控制台调试: __city.setAttraction({ b1: 5 }) 之类
 const onReady = (engine) => (window.__city = engine)
 </script>
@@ -55,6 +66,9 @@ const onReady = (engine) => (window.__city = engine)
     <label><input v-model="heat" type="checkbox" /> 热力</label>
     <label>人数 <input v-model.number="base" type="range" min="0" max="2000" step="50" /> {{ population }}</label>
     <span v-if="stats" class="stat">街上 {{ stats.walking }} · 店内 {{ stats.inside }}</span>
+  </div>
+  <div class="debug-bar nav-bar">
+    <button v-for="n in NAV" :key="n.t" :title="n.tip" @click="n.f">{{ n.t }}</button>
   </div>
   <div v-if="picked" class="debug-bar interior-bar">
     <span>{{ picked.id }}</span>
@@ -79,6 +93,15 @@ const onReady = (engine) => (window.__city = engine)
   backdrop-filter: blur(8px);
   border-radius: 8px;
   user-select: none;
+}
+.nav-bar {
+  left: auto;
+  right: 12px;
+  gap: 2px;
+}
+.nav-bar button {
+  min-width: 28px;
+  font-size: 14px;
 }
 .interior-bar {
   left: 50%;
