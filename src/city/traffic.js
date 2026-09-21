@@ -60,14 +60,15 @@ export class Traffic {
     this.ways = []
     g.edges.forEach((e, edgeIndex) => {
       if (e.width < MIN_ROAD_WIDTH || e.points.length < 2) return
-      const { n, laneW, offsets } = laneLayout(e.width, !!e.oneway)
+      const { n, laneW, offsets } = laneLayout(e.width, !!e.oneway, e.median || 0)
       const pair = []
       for (const dir of e.oneway ? [e.oneway] : [1, -1]) {
         const pts = dir === 1 ? e.points : [...e.points].reverse()
         const from = dir === 1 ? e.a : e.b, to = dir === 1 ? e.b : e.a
         const way = { from, to, edge: e, edgeIndex, n, laneW, lanes: [], twin: null, level: e.level || 0, roundabout: !!e.roundabout }
         for (let k = 0; k < n; k++) {
-          const lane = this.#makeLane(pts, offsets[k], this.nodes[from], this.nodes[to], way.roundabout)
+          const ext = e.ext ? (dir === 1 ? e.ext : [e.ext[1], e.ext[0]]) : null
+          const lane = this.#makeLane(pts, offsets[k], this.nodes[from], this.nodes[to], way.roundabout, ext)
           if (!lane) break
           Object.assign(lane, { way, k, off: offsets[k], cars: [], crosswalks: [], gates: [], onRamp: null, offRamp: null })
           lane.sample = (s) => samplePolyline(lane.pts, lane.cum, s, {})
@@ -96,7 +97,7 @@ export class Traffic {
   }
 
   /** 中心线向右偏移 off 得到车道线（右 = (-dy, dx)，图像坐标 y 向下），两端在路口处截短 */
-  #makeLane(center, off, nodeFrom, nodeTo, ring = false) {
+  #makeLane(center, off, nodeFrom, nodeTo, ring = false, ext = null) {
     const n = center.length
     const out = []
     for (let i = 0; i < n; i++) {
@@ -107,8 +108,9 @@ export class Traffic {
     let cum = cumulative(out)
     // 环道的弧段本来就短（两个进口之间常常只有二三十米），少截一点、放宽最短长度，否则内圈车道会被丢掉
     const k = ring ? 0.5 : 1.05
-    const trimA = nodeFrom.degree >= 3 ? nodeFrom.radius * k : 0
-    const trimB = nodeTo.degree >= 3 ? nodeTo.radius * k : 0
+    // 优先用脚本给的「路口沿本路方向的进深」；老场景文件没有就退回路口半径
+    const trimA = nodeFrom.degree >= 3 ? (ext && !ring ? ext[0] + 1.2 : nodeFrom.radius * k) : 0
+    const trimB = nodeTo.degree >= 3 ? (ext && !ring ? ext[1] + 1.2 : nodeTo.radius * k) : 0
     const len = cum[cum.length - 1]
     if (len - trimA - trimB < (ring ? 3 : 8)) return null
     const pts = slicePolyline(out, cum, trimA, len - trimB)
@@ -123,20 +125,21 @@ export class Traffic {
    */
   #buildRamps() {
     this.ramps = []
+    this.islands = []
     for (const ew of this.ways.filter((w) => w.level)) {
       const eLane = ew.lanes[ew.n - 1]
       const deckHalf = ew.edge.width / 2
       const found = { on: null, off: null }
       for (const sw of this.ways) {
         if (sw.level || sw.roundabout || sw.n < 2) continue
-        const k = sw.lanes.findIndex((l) => l.off - RAMP_W / 2 > deckHalf - 0.15) // 匝道全宽都要在桥面外侧，否则爬升段会和主桥穿模
+        const k = sw.lanes.findIndex((l) => l.off - RAMP_W / 2 > deckHalf - 0.6) // 匝道全宽都要在桥面外侧，否则爬升段会和主桥穿模
         if (k < 0 || (sw.reserved !== undefined && sw.reserved !== k)) continue
         const sl = sw.lanes[k]
         for (const type of ['on', 'off']) for (const RAMP_LEN of RAMP_LENS) {
-          if (sl.len < RAMP_LEN + 28) continue
+          if (sl.len < RAMP_LEN + 24) continue
           // 上桥匝道尽量靠路段前部，下桥匝道尽量靠后部
           const starts = []
-          for (let s0 = 12; s0 + RAMP_LEN <= sl.len - 16; s0 += 4) starts.push(s0)
+          for (let s0 = 10; s0 + RAMP_LEN <= sl.len - 14; s0 += 4) starts.push(s0)
           if (type === 'off') starts.reverse()
           for (const s0 of starts) {
             const a = sl.sample(s0), b = sl.sample(s0 + RAMP_LEN)
@@ -179,6 +182,14 @@ export class Traffic {
         r.eFrom = r.es0 - MERGE_LEN // 下桥: 车在主线上的这个位置开始驶出
         r.eTo = r.es1 + MERGE_LEN   // 上桥: 车在主线上的这个位置完成汇入
         r.gap = merge.map((q) => [q[0], q[1]]) // 主桥护栏在这一段要留缺口
+        // 匝道岛: 坡体下面 + 这条匝道车道上没车走的那一段，交给地面并进隔离带
+        const L = r.sLane
+        const [i0, i1] = r.type === 'on' ? [r.ss0 + 9, L.len] : [0, r.ss0 + r.rlen - 9]
+        const isl = []
+        for (let sI = i0; sI < i1; sI += 4) { const q = L.sample(sI); isl.push([q.x, q.y]) }
+        const qe = L.sample(i1)
+        isl.push([qe.x, qe.y])
+        this.islands.push({ pts: isl, width: L.way.laneW + 0.2 })
         r.cum = cumulative(r.pts)
         r.len = r.cum[r.cum.length - 1]
         r.cars = []

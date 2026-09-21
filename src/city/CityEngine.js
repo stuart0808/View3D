@@ -25,6 +25,7 @@ export const DEFAULT_STYLE = {
   trim: '#eceef1',
   roof: '#d9dce1',
   grass: '#b1c9a8',
+  underDeck: '#c3c8c4',
   park: '#bcd0b1',
   plaza: '#ddd6cb',
   water: '#8fbcdc',
@@ -95,7 +96,7 @@ export class CityEngine {
     this.signals = this.options.signals !== false ? new Signals(sceneData, rand) : null
     // 车流要先建: 停车位线是它排的，地面标线要用
     if (this.options.traffic !== false) this.traffic = new Traffic(sceneData, this.nav, rand, { signals: this.signals })
-    world.add(buildGround(sceneData, this.style, this.traffic?.parkingLines || [], (this.traffic?.ramps || []).map((r) => r.gap)))
+    world.add(buildGround(sceneData, this.style, this.traffic?.parkingLines || [], (this.traffic?.ramps || []).map((r) => r.gap), this.traffic?.islands || []))
     world.add(buildBackdrop(sceneData, this.style, rand))
     const { group, heatGeometry } = buildBuildings(sceneData, this.nav, rand, this.style)
     world.add(group)

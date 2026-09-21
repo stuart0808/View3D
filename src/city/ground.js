@@ -6,7 +6,7 @@ import { laneLayout, hasMedian, ELEVATED_H } from './roads.js'
 
 export const CURB_H = 0.18
 
-export function buildGround(scene, style, parkingLines = [], railGaps = []) {
+export function buildGround(scene, style, parkingLines = [], railGaps = [], islands = []) {
   const group = new THREE.Group()
   group.name = 'ground'
   const std = (color, rough = 0.95) => new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0 })
@@ -39,7 +39,7 @@ export function buildGround(scene, style, parkingLines = [], railGaps = []) {
   }
 
   group.add(buildAreas(scene, style))
-  group.add(buildMarkings(scene, style, parkingLines))
+  group.add(buildMarkings(scene, style, parkingLines, islands))
   group.add(buildElevated(scene, style, railGaps))
 
   // 接住底座影子的透明地面
@@ -107,9 +107,9 @@ function buildAreas(scene, style) {
  *   中心线: 单向 1 车道黄虚线，2 车道双黄实线，≥3 车道改用实体中央隔离带（另建）；
  *   同向车道之间白虚线；单行路（环岛）只有车道分隔线；高架上的线抬到桥面标高。
  */
-function buildMarkings(scene, style, parkingLines) {
+function buildMarkings(scene, style, parkingLines, islands = []) {
   const items = [] // [x, z, angle, length, width, color, y]
-  const medians = []
+  const medians = [], underDeck = []
   const DASH = 3, GAP = 4.5
   const stroke = (pts, off, width, color, dashed, y) => {
     let carry = 0
@@ -127,7 +127,16 @@ function buildMarkings(scene, style, parkingLines) {
   }
   for (const lane of scene.lanes || []) {
     const y = 0.025 + (lane.level ? ELEVATED_H : 0)
-    const { n, laneW, offsets } = laneLayout(lane.width, !!lane.oneway)
+    const { n, laneW, offsets } = laneLayout(lane.width, !!lane.oneway, lane.median || 0)
+    if (lane.median) {
+      // 桥下的路: 中间是一整条桥下隔离带（另建），两侧车道之间白虚线，最内侧画一条白实线当边线
+      underDeck.push(lane)
+      for (const sgn of [1, -1]) {
+        stroke(lane.points, sgn * (offsets[0] - laneW / 2 + 0.15), 0.16, style.marking, false, y)
+        for (let k = 1; k < n; k++) stroke(lane.points, sgn * (offsets[k] - laneW / 2), 0.18, style.marking, true, y)
+      }
+      continue
+    }
     if (lane.oneway) {
       for (let k = 1; k < n; k++) stroke(lane.points, offsets[k] - laneW / 2, 0.18, style.marking, true, y)
       continue
@@ -183,6 +192,30 @@ function buildMarkings(scene, style, parkingLines) {
     const median = new THREE.Mesh(mergeGeometries(boxes), new THREE.MeshStandardMaterial({ color: style.grass, roughness: 1 }))
     median.castShadow = median.receiveShadow = true
     group.add(median)
+  }
+
+  // 桥下隔离带（桥墩立在上面），以及匝道岛: 匝道坡体下面 + 匝道车道不用的那一段，都并进隔离带，
+  // 看起来就是「匝道车道从隔离带里长出来 / 收回去」，而不是几条画着线却没车走的死车道
+  const strips = [
+    ...underDeck.map((l) => ({ pts: l.points, off: 0, width: l.median * 2 })),
+    ...islands.map((i) => ({ pts: i.pts, off: 0, width: i.width })),
+  ]
+  if (strips.length) {
+    const boxes = []
+    for (const st of strips) {
+      for (let i = 0; i + 1 < st.pts.length; i++) {
+        const [ax, ay] = st.pts[i], [bx, by] = st.pts[i + 1]
+        const L = Math.hypot(bx - ax, by - ay)
+        if (L < 0.3) continue
+        const b = new THREE.BoxGeometry(L + 0.1, 0.22, st.width)
+        b.rotateY(Math.atan2(-(by - ay), bx - ax))
+        b.translate((ax + bx) / 2, 0.11, (ay + by) / 2)
+        boxes.push(b)
+      }
+    }
+    const mesh = new THREE.Mesh(mergeGeometries(boxes), new THREE.MeshStandardMaterial({ color: style.underDeck, roughness: 1 }))
+    mesh.receiveShadow = true
+    group.add(mesh)
   }
   return group
 }

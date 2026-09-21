@@ -768,6 +768,16 @@ def main():
                     others = [t for t in others if t[0] != cont[0]]
             return max(edge_w[i] for i, _ in others) / 2
 
+        # 桥下的路: 中心线大部分压在高架下面。桥面正下方是桥墩和隔离带，不走车，前端据此把车道排在桥面投影两侧
+        deck_half = float(cv2.distanceTransform(emask, cv2.DIST_L2, 5).max()) * mpp if emask.any() else 0.0
+
+        def under_deck(pts):
+            if deck_half <= 0:
+                return 0.0
+            ix = np.clip(pts[:, 0].round().astype(int), 0, W - 1)
+            iy = np.clip(pts[:, 1].round().astype(int), 0, H - 1)
+            return round(deck_half, 2) if (emask[iy, ix] > 0).mean() > 0.6 else 0.0
+
         ring_nodes = set()
         for a, b, pts in edges:
             if ring_of(pts):
@@ -775,6 +785,7 @@ def main():
         for ei, (a, b, pts) in enumerate(edges):
             w_m = edge_w[ei]
             oneway = ring_of(pts)
+            median = under_deck(pts)
             sp = cv2.approxPolyDP(pts.astype(np.float32).reshape(-1, 1, 2), max(1.5, 0.8 / mpp), False).reshape(-1, 2).astype(np.float64)
             pm = to_m(sp)
             total = poly_len(pm)
@@ -784,7 +795,9 @@ def main():
                 road_graph["nodes"][str(nid)] = {"pos": [round(float(v), 2) for v in to_m([nx_, ny_])], "radius": round(rad, 2), "degree": int(deg.get(nid, 0)),
                                                  **({"roundabout": True} if nid in ring_nodes else {})}
             road_graph["edges"].append({"a": str(a), "b": str(b), "width": round(w_m, 2), "points": [[round(float(x), 2), round(float(y), 2)] for x, y in pm],
-                                        **({"oneway": oneway, "roundabout": True} if oneway else {})})
+                                        **({"oneway": oneway, "roundabout": True} if oneway else {}), **({"median": median} if median else {}),
+                                        # ext: 路口沿这条路方向伸进来多深（两端各一个），车道据此截短；比用路口半径准，宽路接窄路时差很多
+                                        "ext": [round(box_extent(a, ei), 2) if deg.get(a, 0) >= 3 else 0, round(box_extent(b, ei), 2) if deg.get(b, 0) >= 3 else 0]})
             if oneway:  # 环道: 不设斑马线，只画车道分隔线（点序调成行驶方向，前端按「行驶方向右侧」算偏移）
                 if total > 8:
                     piece = cut_polyline(pm, 3.0, total - 3.0)
@@ -828,7 +841,7 @@ def main():
             cuts = [trim[0]] + [v for s in mids for v in (s - CW_DEPTH / 2 - 1, s + CW_DEPTH / 2 + 1)] + [total - trim[1]]
             for j in range(0, len(cuts), 2):
                 if cuts[j + 1] - cuts[j] > 5:
-                    lanes.append(dict(points=cut_polyline(pm, cuts[j], cuts[j + 1]), width=w_m))
+                    lanes.append(dict(points=cut_polyline(pm, cuts[j], cuts[j + 1]), width=w_m, median=median))
         log(f"道路中心线 {len(lanes)} 段, 斑马线 {len(crosswalks)} 处")
 
     # ---------------- 高架 ----------------
@@ -944,7 +957,8 @@ def main():
         "roadGraph": road_graph,
         "elevated": geom_to_json(elevated),
         "lanes": [{"points": [r2(p) for p in l["points"]], "width": round(l["width"], 2),
-                   **({"oneway": True} if l.get("oneway") else {}), **({"level": 1} if l.get("level") else {})} for l in lanes],
+                   **({"oneway": True} if l.get("oneway") else {}), **({"level": 1} if l.get("level") else {}),
+                   **({"median": l["median"]} if l.get("median") else {})} for l in lanes],
         "crosswalks": [{"center": r2(c["center"]), "dir": [round(float(c["dir"][0]), 4), round(float(c["dir"][1]), 4)],
                         "span": round(c["span"], 2), "depth": c["depth"], "node": c.get("node"), "edge": c.get("edge")} for c in crosswalks],
         "doors": [{"building": d["building"], "pos": r2(d["pos"]), "normal": [round(float(d["normal"][0]), 4), round(float(d["normal"][1]), 4)]} for d in doors],
