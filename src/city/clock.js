@@ -87,6 +87,9 @@ export class SimClock {
     this.#jump(target.getTime())
   }
 
+  /** 跳到任意时刻（毫秒时间戳） */
+  jumpTo(ms) { this.#jump(ms) }
+
   /** 跳到下一个指定类型的日子的 hour 点（'workday' | 'weekend' | 'holiday'） */
   jumpToDayType(type, h = 10) {
     const d = this.date

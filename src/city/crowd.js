@@ -5,6 +5,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { UNREACHABLE, SURFACE } from './navgrid.js'
 import { signedArea, interiorPoints } from './geometry.js'
 import { CURB_H } from './ground.js'
+import { GROUPS } from './demand.js'
 
 const FREE = 0, WALK = 1, ENTER = 2, INSIDE = 3, EXIT = 4, IDLE = 5 // IDLE: 在公园/广场里站着歇会儿
 const PALETTE = ['#f5f5f4', '#f5f5f4', '#e7e5e4', '#d6d3d1', '#cbd5e1', '#94a3b8', '#64748b', '#475569', '#334155', '#1f2937', '#1f2937', '#9a6b4b', '#3b5b8c']
@@ -30,8 +31,14 @@ export function personGeometry() {
 export const PEOPLE_PALETTE = PALETTE
 
 export class Crowd {
-  constructor(scene, nav, rand, { capacity = 4000, peopleScale = 1.5, signals = null } = {}) {
+  constructor(scene, nav, rand, { capacity = 4000, peopleScale = 1.5, signals = null, demand = null } = {}) {
     this.nav = nav
+    this.demand = demand // 需求模型（人群分组 + 场馆活动）。为 null 时退回「随机逛几家店」的老逻辑
+    this.base = 600 // 高峰人数；有需求模型时，实际应有人数由它按时刻算
+    this.groupActive = GROUPS.map(() => 0)
+    this.groupTargets = GROUPS.map(() => 0)
+    this._demandTimer = 0
+    this.colorsDirty = false
     this.signals = signals
     this.rand = rand
     this.capacity = capacity
@@ -58,6 +65,8 @@ export class Crowd {
     this.scale = new Float32Array(n)
     this.hx = new Float32Array(n); this.hy = new Float32Array(n) // 在店内时的热力落点
     this.door = new Uint8Array(n) // 进的是这栋楼的第几扇门
+    this.group = new Uint8Array(n) // 属于哪类人群（GROUPS 的下标）
+    this.afterEvent = new Uint8Array(n) // 刚看完演出出来: 下一步多半是回家
     this.ex = new Float32Array(n); this.ey = new Float32Array(n) // 出门后先走到的门外落脚点
     this.heatSamples = new Float32Array(n * 3)
     this.heatCount = 0
@@ -102,7 +111,8 @@ export class Crowd {
       byBuilding.get(d.building).push({ x: d.pos[0], y: d.pos[1], cell, c: nav.center(cell) })
     }
     for (const [id, doors] of byBuilding) {
-      this.dests.push({ type: 'door', building: id, kind: byId.get(id).kind, doors, cells: doors.map((q) => q.cell), x: doors[0].x, y: doors[0].y, c: doors[0].c, field: null, weight: 0 })
+      const CAT = { shop: 'shop', block: 'office', residential: 'home', venue: 'venue' }
+      this.dests.push({ type: 'door', building: id, kind: byId.get(id).kind, cat: CAT[byId.get(id).kind] || 'shop', enRoute: 0, doors, cells: doors.map((q) => q.cell), x: doors[0].x, y: doors[0].y, c: doors[0].c, field: null, weight: 0 })
     }
     for (const p of scene.portals || []) {
       const cell = nav.nearestWalkable(p.pos[0], p.pos[1], 25)
@@ -117,12 +127,14 @@ export class Crowd {
       const pts = interiorPoints(a.polygon, a.holes || [], n * 4, this.rand).filter(([x, y]) => nav.isWalkable(x, y)).slice(0, n)
       for (const [x, y] of pts) {
         const cell = nav.index(x, y)
-        this.dests.push({ type: 'spot', x, y, cell, c: nav.center(cell), field: null, weight: ((area / 1000) * (a.kind === 'park' ? 0.8 : 0.5)) / pts.length })
+        this.dests.push({ type: 'spot', cat: a.kind, x, y, cell, c: nav.center(cell), field: null, weight: ((area / 1000) * (a.kind === 'park' ? 0.8 : 0.5)) / pts.length })
       }
     }
     // 「逛」的目的地 = 店门 + 歇脚点
     this.doors = this.dests.map((d, i) => (d.type !== 'portal' ? i : -1)).filter((i) => i >= 0)
     this.portals = this.dests.map((d, i) => (d.type === 'portal' ? i : -1)).filter((i) => i >= 0)
+    this.byCat = {}
+    this.dests.forEach((d, i) => { if (d.cat) (this.byCat[d.cat] ||= []).push(i) })
     this.pendingFields = this.dests.map((_, i) => i)
     this.#refreshWeights()
   }
@@ -153,7 +165,7 @@ export class Crowd {
     this.mesh.castShadow = true
     this.mesh.frustumCulled = false
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-    const c = new THREE.Color()
+    const c = (this._col = new THREE.Color())
     for (let i = 0; i < this.capacity; i++) this.mesh.setColorAt(i, c.set(PALETTE[(this.rand() * PALETTE.length) | 0]))
   }
 
@@ -169,6 +181,7 @@ export class Crowd {
     const ref = this.portals.length ? this.dests[this.portals[0]].field : null
     this.reachable = []
     if (ref) for (let k = 0; k < ref.length; k++) if (ref[k] !== UNREACHABLE && this.nav.penalty[k] < 1) this.reachable.push(k)
+    this.#refreshDemand(true)
     const n = Math.min(this.population, this.capacity)
     for (let i = 0; i < n && this.reachable.length; i++) {
       const k = this.reachable[(this.rand() * this.reachable.length) | 0]
@@ -201,14 +214,65 @@ export class Crowd {
     return -1
   }
 
+  #free(i) {
+    this.state[i] = FREE
+    this.active--
+    this.groupActive[this.group[i]]--
+  }
+
+  /**
+   * 选下一站。有需求模型时: 先按「所属人群 × 当前时段」的偏好抽一个活动类别，再在这一类里按吸引力和距离抽具体地点。
+   * 场馆只在活动进场时段可选，权重随「还差多少观众」变化；刚散场出来的人多半直接回家。
+   */
+  #chooseNext(i, x, y, exclude = -1) {
+    if (!this.demand) return -2
+    const mix = { ...(this.afterEvent[i] ? { leave: 8, shop: 2 } : this.demand.mix(this.group[i])) }
+    this.afterEvent[i] = 0
+    delete mix.venue
+    for (const di of this.byCat.venue || []) {
+      const d = this.dests[di], ph = this.demand.phaseOf(d.building)
+      d.open = false
+      if (!ph || ph.phase !== 'ingress') continue
+      // 「此刻应该已经到场的人数」随进场进度增长（开场前 75 分钟开始，越临近越多），还差多少就有多大吸引力
+      const need = ph.ev.attendance * Math.min(1, ph.progress * 1.15 + 0.05) - this.buildings.get(d.building).visitors - d.enRoute
+      if (need <= 0) continue
+      d.open = true
+      mix.venue = (mix.venue || 0) + 60 * (need / ph.ev.attendance)
+    }
+    let total = 0
+    for (const [cat, wgt] of Object.entries(mix)) { if (cat !== 'leave' && !(this.byCat[cat] || []).length) mix[cat] = 0; else total += wgt }
+    let r = this.rand() * total, chosen = 'leave'
+    for (const [cat, wgt] of Object.entries(mix)) { r -= wgt; if (wgt > 0 && r <= 0) { chosen = cat; break } }
+    if (chosen === 'leave') return this.#pick([...this.portals, ...(this.byCat.home || [])], x, y)
+    const list = chosen === 'venue' ? this.byCat.venue.filter((di) => this.dests[di].open) : this.byCat[chosen]
+    const got = this.#pick(list, x, y, exclude)
+    if (got >= 0 && this.dests[got].cat === 'venue') this.dests[got].enRoute++
+    return got >= 0 ? got : this.#pick(this.portals, x, y)
+  }
+
   #spawn(x, y, midway = false) {
     let i = 0
     while (i < this.capacity && this.state[i] !== FREE) i++
     if (i >= this.capacity) return -1
-    const shopper = this.rand() < this.shopRatio && this.doors.length > 0
-    this.stops[i] = shopper ? 1 + ((this.rand() * 3) | 0) : 0
-    if (midway && shopper && this.rand() < 0.5) this.stops[i] = Math.max(0, this.stops[i] - 1)
-    const dest = this.stops[i] > 0 ? this.#pick(this.doors, x, y) : this.#pick(this.portals, x, y)
+    let dest
+    if (this.demand) {
+      // 进场的是哪类人: 缺口最大的那一类；各类都不缺（多出来的是活动观众）就按观众构成抽
+      let g = 0, best = -Infinity
+      this.groupTargets.forEach((t, k) => { const gap = t - this.groupActive[k]; if (gap > best) { best = gap; g = k } })
+      if (best <= 0) { const r = this.rand(); g = r < 0.35 ? 0 : r < 0.8 ? 2 : r < 0.95 ? 3 : 1 }
+      this.group[i] = g
+      this.afterEvent[i] = 0
+      dest = this.#chooseNext(i, x, y)
+      if (midway && dest >= 0 && this.dests[dest].type === 'portal') dest = this.#chooseNext(i, x, y) // 铺场时少放一些「正要走」的人
+      const pal = GROUPS[g].colors
+      this.mesh.setColorAt(i, this._col.set(pal[(this.rand() * pal.length) | 0]))
+      this.colorsDirty = true
+    } else {
+      const shopper = this.rand() < this.shopRatio && this.doors.length > 0
+      this.stops[i] = shopper ? 1 + ((this.rand() * 3) | 0) : 0
+      if (midway && shopper && this.rand() < 0.5) this.stops[i] = Math.max(0, this.stops[i] - 1)
+      dest = this.stops[i] > 0 ? this.#pick(this.doors, x, y) : this.#pick(this.portals, x, y)
+    }
     if (dest < 0) return -1
     this.state[i] = WALK
     this.x[i] = x + (this.rand() - 0.5) * 0.6
@@ -221,16 +285,22 @@ export class Crowd {
     this.scale[i] = midway ? 1 : 0
     this.high = Math.max(this.high, i + 1)
     this.active++
+    this.groupActive[this.group[i]]++
+    // 铺场（开场 / 跳时间）: 此刻大部分上班族在楼里、观众在场馆里，不该全撒在街上
+    const d = this.dests[dest]
+    if (midway && this.demand && d.type === 'door' && d.cat !== 'home' && this.rand() < (d.cat === 'office' ? 0.85 : d.cat === 'venue' ? 0.9 : 0.45)) {
+      if (d.cat === 'venue') d.enRoute = Math.max(0, d.enRoute - 1)
+      this.door[i] = (this.rand() * d.doors.length) | 0
+      this.#goInside(i, d)
+      this.timer[i] *= 0.15 + this.rand() * 0.85
+    }
     return i
   }
 
   #arrive(i) {
     const d = this.dests[this.dest[i]]
-    if (d.type === 'portal') {
-      this.state[i] = FREE
-      this.active--
-      return
-    }
+    if (d.type === 'portal') return this.#free(i)
+    if (d.cat === 'venue') d.enRoute = Math.max(0, d.enRoute - 1)
     if (d.type === 'spot') {
       this.state[i] = IDLE
       this.vx[i] = this.vy[i] = 0
@@ -255,8 +325,9 @@ export class Crowd {
     }
     this.stops[i] = Math.max(0, this.stops[i] - 1)
     const from = wasInside ? d.doors[this.door[i]].c : d.c
-    const next = this.stops[i] > 0 ? this.#pick(this.doors, from[0], from[1], this.dest[i]) : this.#pick(this.portals, from[0], from[1])
-    if (next < 0) { this.state[i] = FREE; this.active--; return }
+    let next = this.#chooseNext(i, from[0], from[1], this.dest[i])
+    if (next === -2) next = this.stops[i] > 0 ? this.#pick(this.doors, from[0], from[1], this.dest[i]) : this.#pick(this.portals, from[0], from[1])
+    if (next < 0) return this.#free(i)
     this.dest[i] = next
     if (!wasInside) { this.state[i] = WALK; return }
     this.state[i] = EXIT
@@ -266,11 +337,22 @@ export class Crowd {
     this.ex[i] = dq.c[0]; this.ey[i] = dq.c[1]
   }
 
+  /** 有需求模型时: 各人群的应有人数 + 活动观众 = 总应有人数 */
+  #refreshDemand(force = false) {
+    this._demandTimer = 20 // 仿真秒
+    if (!this.demand) return
+    this.groupTargets = this.demand.targets(this.base)
+    this.population = this.groupTargets.reduce((a, b) => a + b, 0) + this.demand.eventExtra()
+  }
+
   /** 手动跳时间之后: 清空所有人，按当前目标人数重新撒一遍 */
   reseed() {
     this.state.fill(FREE)
     this.high = this.active = this.insideCount = 0
+    this.groupActive.fill(0)
+    for (const d of this.dests) if (d.enRoute) d.enRoute = 0
     for (const b of this.buildings.values()) b.visitors = 0
+    this.#refreshDemand(true)
     if (!this.ready) return
     const n = Math.min(this.population, this.capacity)
     for (let i = 0; i < n && this.reachable.length; i++) {
@@ -285,6 +367,9 @@ export class Crowd {
     if (!this.ready && !this.#warmup()) return
     const { nav, state, x, y, vx, vy } = this
     const la = this._la
+
+    this._demandTimer -= dt
+    if (this._demandTimer <= 0) this.#refreshDemand()
 
     // 维持目标人数
     const want = Math.min(this.population, this.capacity)
@@ -342,7 +427,7 @@ export class Crowd {
       // WALK
       this.scale[i] = Math.min(1, this.scale[i] + dt * 3)
       const look = nav.lookAhead(d.field, x[i], y[i], 5, la)
-      if (!look) { state[i] = FREE; this.active--; continue }
+      if (!look) { this.#free(i); continue }
       if (la[2] < 1.4) { this.#arrive(i); continue }
       let gx = la[0] - x[i], gy = la[1] - y[i]
       let gl = Math.hypot(gx, gy) || 1
@@ -391,9 +476,16 @@ export class Crowd {
   }
 
   #goInside(i, d) {
+    if (d.cat === 'home' && this.demand) return this.#free(i) // 回到住处 = 离开仿真
     this.state[i] = INSIDE
     this.scale[i] = 0
     this.timer[i] = (5 + this.rand() * 20) * 60 * this.dwellScale // 逛一家店 5~25 分钟（仿真时间）
+    if (this.demand && d.cat === 'office') this.timer[i] = this.demand.officeStay(this.rand)
+    if (this.demand && d.cat === 'venue') {
+      const ph = this.demand.phaseOf(d.building)
+      // 观众待到散场，再花 0~20 分钟陆续走出来
+      if (ph && ph.phase !== 'egress') { this.timer[i] = (ph.ev.end - this.demand.clock.t) / 1000 + this.rand() * 1200; this.afterEvent[i] = 1 }
+    }
     const b = this.buildings.get(d.building)
     b.visitors++
     this.insideCount++
@@ -464,6 +556,7 @@ export class Crowd {
     }
     this.mesh.count = this.high
     this.mesh.instanceMatrix.needsUpdate = true
+    if (this.colorsDirty) { this.mesh.instanceColor.needsUpdate = true; this.colorsDirty = false }
   }
 
   /** (x,y) 半径 r 内正在走路的人数；onRoadOnly 时只数脚下是车行道的（= 正在过马路的），车流据此让行 */
@@ -486,7 +579,8 @@ export class Crowd {
   stats() {
     const perBuilding = {}
     for (const [id, b] of this.buildings) perBuilding[id] = b.visitors
-    return { active: this.active, inside: this.insideCount, walking: this.active - this.insideCount, perBuilding }
+    const groups = this.demand ? GROUPS.map((g, k) => ({ id: g.id, label: g.label, active: this.groupActive[k], target: this.groupTargets[k] })) : null
+    return { active: this.active, inside: this.insideCount, walking: this.active - this.insideCount, perBuilding, groups, events: this.demand?.upcoming() || [] }
   }
 
   dispose() {

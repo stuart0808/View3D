@@ -7,6 +7,7 @@ import { buildBuildings, hiddenBuilding } from './buildings.js'
 import { Interior } from './interior.js'
 import { SimClock, activity, daylight } from './clock.js'
 import { Transit } from './transit.js'
+import { Demand } from './demand.js'
 import { Crowd } from './crowd.js'
 import { HeatLayer } from './heat.js'
 import { Traffic } from './traffic.js'
@@ -127,7 +128,10 @@ export class CityEngine {
       }
     }
     const withStations = { ...sceneData, portals: [...(sceneData.portals || []), ...(this.transit?.portals() || [])] } // 车站出入口也是人流出入口
-    this.crowd = new Crowd(withStations, this.nav, rand, { capacity: this.options.capacity, peopleScale: this.options.peopleScale, signals: this.signals })
+    // 需求模型: 人群分组作息 + 场馆活动排期（options.demand === false 可关掉，退回「随机逛店」）
+    const venues = sceneData.buildings.filter((b) => b.kind === 'venue').map((b) => ({ id: b.id, name: b.venue?.name || b.id, type: b.venue?.type || 'default', capacity: b.venue?.capacity || 2000 }))
+    this.demand = this.options.demand === false ? null : new Demand(this.clock, venues, this.options.demandOptions)
+    this.crowd = new Crowd(withStations, this.nav, rand, { capacity: this.options.capacity, peopleScale: this.options.peopleScale, signals: this.signals, demand: this.demand })
     this._envTimer = 0
     this.crowd.dwellScale = this._dwellScale ?? 1
     world.add(this.crowd.mesh)
@@ -354,7 +358,8 @@ export class CityEngine {
     if (this._envTimer > 0 || !this.crowd) return
     this._envTimer = 0.5
     const { dayType, hour } = this.clock
-    this.crowd.population = Math.round((this._population ?? 600) * activity('people', dayType, hour))
+    this.crowd.base = this._population ?? 600
+    if (!this.demand) this.crowd.population = Math.round(this.crowd.base * activity('people', dayType, hour)) // 有需求模型时，应有人数由人群分组 + 活动算出
     this.traffic?.setDemand(activity('cars', dayType, hour))
 
     const dl = daylight(hour)
@@ -381,6 +386,13 @@ export class CityEngine {
   }
 
   /** 仿真速度（倍）。0 = 暂停 */
+  /** 跳到下一场场馆活动开始进场的时候 */
+  jumpToNextEvent() {
+    const t = this.demand?.nextIngress()
+    if (t) this.clock.jumpTo(t)
+    return !!t
+  }
+
   setRate(r) { this.clock.paused = r <= 0; if (r > 0) this.clock.setRate(r) }
 
   stats() { return this.crowd ? { ...this.crowd.stats(), clock: this.clock.label, dayType: this.clock.dayType, cars: this.traffic?.roadCount ?? 0, transit: this.transit?.stats() || null } : null }

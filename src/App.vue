@@ -19,6 +19,7 @@ const JUMPS = [
   { t: '夜晚', f: (c) => c.jumpToHour(21.5) },
   { t: '下个周末', f: (c) => c.jumpToDayType('weekend', 15) },
   { t: '下个节假日', f: (c) => c.jumpToDayType('holiday', 15) },
+  { t: '下一场活动', f: () => window.__city.jumpToNextEvent() },
 ]
 const setRate = (v) => (rate.value = v)
 const stats = ref(null)
@@ -76,6 +77,12 @@ const onReady = (engine) => (window.__city = engine)
     <label>高峰人数 <input v-model.number="base" type="range" min="0" max="2000" step="50" /> {{ base }}</label>
     <span v-if="stats" class="stat">街上 {{ stats.walking }} · 店内 {{ stats.inside }} · 车 {{ stats.cars }}<template v-if="stats.transit"> · 列车 {{ Object.values(stats.transit.trains).reduce((a, b) => a + b, 0) }}（{{ stats.transit.timetable === 'workday' ? '工作日' : '节假日' }}时刻表）</template></span>
   </div>
+  <div v-if="stats && (stats.groups || stats.events.length)" class="debug-bar info-bar">
+    <span v-for="g in stats.groups || []" :key="g.id" class="stat">{{ g.label }} {{ g.active }}</span>
+    <span v-for="ev in stats.events" :key="ev.start + ev.venue" class="stat">
+      · {{ ev.venueName }} {{ ev.time }} {{ ev.title }}（{{ { scheduled: '未开始', ingress: '进场中', live: '进行中', egress: '散场中' }[ev.phase] }}，约 {{ ev.realAttendance }} 人）
+    </span>
+  </div>
   <div class="debug-bar nav-bar">
     <button v-for="n in NAV" :key="n.t" :title="n.tip" @click="n.f">{{ n.t }}</button>
   </div>
@@ -104,6 +111,11 @@ const onReady = (engine) => (window.__city = engine)
   backdrop-filter: blur(8px);
   border-radius: 8px;
   user-select: none;
+}
+.info-bar {
+  bottom: auto;
+  top: 12px;
+  max-width: calc(100vw - 24px);
 }
 .nav-bar {
   left: auto;
