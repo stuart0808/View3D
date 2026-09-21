@@ -450,8 +450,35 @@ def prune_and_merge(nodes, edges, dt):
             edges.append([a, b, np.vstack([p1, p2[1:]])])
             merged = True
             break
-        if not merged:
+        if merged:
+            continue
+        # 路口合并: 宽路和窄路相交时，骨架常把一个路口拆成两个挨得很近的节点，中间连一条比路宽还短的「假路段」。
+        # 留着它车会在路口里面排队、和别的进口道的车叠在一起。把这种边收缩掉，两个节点并成一个。
+        short = None
+        for e in edges:
+            a, b, pts = e
+            if a != b and deg[a] >= 3 and deg[b] >= 3 and poly_len(pts) < 0.9 * max_width_of(pts):
+                if short is None or poly_len(pts) < poly_len(short[2]):
+                    short = e
+        if short is None:
             break
+        a, b, _ = short
+        edges.remove(short)
+        # 合并后的位置取两者里「更靠路中心」的那个（距离变换值大的）。取中点会让节点偏离宽路的中心线，
+        # 而车道是按「到节点的距离」截短的，一偏支路车道就伸进主干路里去了
+        def dt_at(n_):
+            x_, y_ = nodes[n_]
+            return float(dt[min(dt.shape[0] - 1, max(0, int(round(y_)))), min(dt.shape[1] - 1, max(0, int(round(x_))))])
+        pos = nodes[a] if dt_at(a) >= dt_at(b) else nodes[b]
+        nodes[a] = pos
+        for e in edges:
+            for end in (0, 1):
+                if e[end] in (a, b):
+                    e[end] = a
+                    e[2] = e[2].copy()
+                    e[2][0 if end == 0 else -1] = pos
+        # 合并后可能出现很短的自环（原来两点之间的另一条平行短边），一并去掉
+        edges[:] = [e for e in edges if not (e[0] == e[1] and poly_len(e[2]) < 3 * max_width_of(e[2]))]
     deg = {}
     for a, b, _ in edges:
         deg[a] = deg.get(a, 0) + 1
@@ -726,6 +753,63 @@ def main():
         dt = cv2.distanceTransform(rmask, cv2.DIST_L2, 5)
         nodes, edges = skeleton_graph(sk)
         edges, deg, width_of = prune_and_merge(nodes, edges, dt)
+
+        # —— 路口归正 ——
+        # 细化算法得到的骨架，窄路进宽路时是斜着接到宽路中心线上的，正对着的两条支路会接在相距二十多米的两个点上；
+        # 后面车道的截短、斑马线的位置都是「从节点沿折线量距离」，节点不在真正的路口中心、折线进路口时拐弯，量出来就全是错的
+        # （车道伸进横向道路里、车叠在一起）。所以:
+        #   1) 用各条路在路口范围之外的直线段求交（最小二乘），得到路口的真实中心；
+        #   2) 把各条路的折线从路口范围边缘直接拉直接到这个中心。
+        def dt_m(pos_):
+            return float(dt[min(H - 1, max(0, int(round(pos_[1])))), min(W - 1, max(0, int(round(pos_[0]))))])
+
+        ends = {}  # nid -> [(edge, end)]
+        for e in edges:
+            if e[0] == e[1]:
+                continue
+            ends.setdefault(e[0], []).append((e, 0))
+            ends.setdefault(e[1], []).append((e, 1))
+        reach = {}
+        for nid, lst in ends.items():
+            if deg.get(nid, 0) < 3:
+                continue
+            c_ = np.array(nodes[nid], dtype=np.float64)
+            r_ = max(dt_m(c_) * 1.15, max(width_of(e[2]) for e, _ in lst) * 0.6)  # 路口范围: 至少盖住最宽那条路的半幅
+            A_ = np.zeros((2, 2))
+            b_ = np.zeros(2)
+            for e, end in lst:
+                q = e[2] if end == 0 else e[2][::-1]
+                far = q[np.hypot(q[:, 0] - c_[0], q[:, 1] - c_[1]) > r_][:int(30 / mpp)]
+                if len(far) < 8:
+                    continue
+                mean = far.mean(0)
+                d_ = np.linalg.svd(far - mean)[2][0]
+                M_ = np.eye(2) - np.outer(d_, d_)
+                A_ += M_
+                b_ += M_ @ mean
+            new = c_
+            on_ring = any(np.hypot(c_[0] - ic[0], c_[1] - ic[1]) < ir + px(18) for ic, ir, _ in islands)  # 环岛的弧不是直线，不拿来求交
+            if not on_ring and np.linalg.cond(A_) < 50:
+                cand = np.linalg.solve(A_, b_)
+                if np.hypot(*(cand - c_)) < r_ * 1.6 and rmask[min(H - 1, max(0, int(round(cand[1])))), min(W - 1, max(0, int(round(cand[0]))))]:
+                    new = cand
+            nodes[nid] = (float(new[0]), float(new[1]))
+            reach[nid] = max(r_, dt_m(new) * 1.15)
+
+        for e in edges:
+            a_, b_, pts_ = e
+            if a_ == b_:
+                continue
+            for end, nid in ((0, a_), (1, b_)):
+                if nid not in reach:
+                    continue
+                c_ = np.array(nodes[nid], dtype=np.float64)
+                far = np.nonzero(np.hypot(pts_[:, 0] - c_[0], pts_[:, 1] - c_[1]) > reach[nid])[0]
+                if len(far) < 2:
+                    continue  # 整条边都在路口范围内（环岛的短弧等），不动
+                pts_ = np.vstack([c_, pts_[far[0]:]]) if end == 0 else np.vstack([pts_[:far[-1] + 1], c_])
+            e[2] = pts_
+
         CW_DEPTH, CORNER = 3.2, 2.5
 
         def ring_of(pts):

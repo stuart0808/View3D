@@ -6,6 +6,8 @@
 //       转弯让直行和行人；进环岛让环内车；行经人行横道遇行人停车让行
 //   · 环岛: 环内逆时针单行，不设灯；高架: 独立一层，不与地面路网相交，靠自动生成的上/下匝道和桥下的主干路连通
 //     （高架两端通到图外，所以匝道给地面路网带来了净流入和净流出）
+//   · 超车: 路段中间（离路口够远）前车明显比自己慢、左侧车道有空档，就变到左侧车道超过去，拉开距离后驶回原车道；
+//     不越过中心线借对向车道，要进匝道/停车场的车不超车
 //   · 停车场和带地下车库的楼: 车会从最外侧车道拐进去停下/消失，也会定时有车开出来汇入车流
 import * as THREE from 'three'
 import { carGeometry, carMaterial, CAR_COLORS, layoutParking } from './props.js'
@@ -19,6 +21,7 @@ const MIN_ROAD_WIDTH = 5.5 // 比这窄的路不走车
 const CAR_LEN = 4.3
 const V_MAX = 7.5, V_TURN = 4, V_LOT = 2.8, V_RAMP = 5.5, ACCEL = 2.5, BRAKE = 6
 const RAMP_W = 4.4
+const LANE_CHANGE_V = 1.5 // 变道时的横移速度 (m/s)
 const MERGE_LEN = 22 // 匝道到桥面标高后，并入/驶出主线的平段长度
 const RAMP_LENS = [75, 60, 48] // 匝道水平长度（米），路段放得下就用长的；真实匝道更长，示例街区小，48m 时坡度约 13%
 
@@ -58,6 +61,8 @@ export class Traffic {
     this.nodes = {}
     for (const [id, n] of Object.entries(g.nodes)) this.nodes[id] = { ...n, busy: null, out: [], inn: [] }
     this.ways = []
+    this.laneSeq = 0
+    this.turnPaths = new Map()
     g.edges.forEach((e, edgeIndex) => {
       if (e.width < MIN_ROAD_WIDTH || e.points.length < 2) return
       const { n, laneW, offsets } = laneLayout(e.width, !!e.oneway, e.median || 0)
@@ -70,7 +75,7 @@ export class Traffic {
           const ext = e.ext ? (dir === 1 ? e.ext : [e.ext[1], e.ext[0]]) : null
           const lane = this.#makeLane(pts, offsets[k], this.nodes[from], this.nodes[to], way.roundabout, ext)
           if (!lane) break
-          Object.assign(lane, { way, k, off: offsets[k], cars: [], crosswalks: [], gates: [], onRamp: null, offRamp: null })
+          Object.assign(lane, { id: this.laneSeq++, way, k, off: offsets[k], cars: [], crosswalks: [], gates: [], onRamp: null, offRamp: null })
           lane.sample = (s) => samplePolyline(lane.pts, lane.cum, s, {})
           way.lanes.push(lane)
         }
@@ -109,8 +114,9 @@ export class Traffic {
     // 环道的弧段本来就短（两个进口之间常常只有二三十米），少截一点、放宽最短长度，否则内圈车道会被丢掉
     const k = ring ? 0.5 : 1.05
     // 优先用脚本给的「路口沿本路方向的进深」；老场景文件没有就退回路口半径
-    const trimA = nodeFrom.degree >= 3 ? (ext && !ring ? ext[0] + 1.2 : nodeFrom.radius * k) : 0
-    const trimB = nodeTo.degree >= 3 ? (ext && !ring ? ext[1] + 1.2 : nodeTo.radius * k) : 0
+    // 车的坐标是车身中心，车头还要往前探半个车长，所以在路口进深之外再退半个车身多一点，停下时车头才不会伸进横向车道
+    const trimA = nodeFrom.degree >= 3 ? (ext && !ring ? ext[0] + CAR_LEN / 2 + 1.0 : nodeFrom.radius * k) : 0
+    const trimB = nodeTo.degree >= 3 ? (ext && !ring ? ext[1] + CAR_LEN / 2 + 1.0 : nodeTo.radius * k) : 0
     const len = cum[cum.length - 1]
     if (len - trimA - trimB < (ring ? 3 : 8)) return null
     const pts = slicePolyline(out, cum, trimA, len - trimB)
@@ -380,7 +386,8 @@ export class Traffic {
   #newCar() {
     const car = {
       mode: 'lane', lane: null, s: 0, v: 0, level: 0, move: 'S', rtor: false, x: 0, y: 0, dx: 1, dy: 0, scale: 1, wait: 0, push: 0, nextWay: null, nextPlan: null, parkAt: null,
-      color: CAR_COLORS[(this.rand() * CAR_COLORS.length) | 0], vmax: V_MAX * (0.8 + this.rand() * 0.35),
+      color: CAR_COLORS[(this.rand() * CAR_COLORS.length) | 0], vmax: V_MAX * (this.rand() < 0.2 ? 0.5 + this.rand() * 0.15 : 0.85 + this.rand() * 0.3), // 两成是慢车
+      lat: 0, ghost: null, homeK: -1, passing: null,
     }
     this.cars.push(car)
     this.colorsDirty = true
@@ -535,6 +542,8 @@ export class Traffic {
 
     const toEnd = lane.len - car.s
     let vmax = car.vmax
+    this.#considerOvertake(car, lane.cars[idx + 1], toEnd)
+    if (car.lane !== lane) return // 刚变了道，下一帧按新车道算
     if (car.takeRamp) {
       const r = car.takeRamp
       const d = (r.type === 'on' ? r.ss0 : r.eFrom) - car.s
@@ -556,6 +565,14 @@ export class Traffic {
       const node = this.nodes[lane.way.to]
       const signalized = this.signals?.has(lane.way.to)
       const entryFull = car.nextPlan.lane.cars.some((c) => c.s < CAR_LEN + 4)
+      const toLine = lane.stopS - (car.s + CAR_LEN / 2)
+      // 从本车道进路口的前车还没走出一个车身: 它已经不在车道的列表里了，要单独看，否则会跟着开到同一个点上
+      // 能停在停车线后就停在线后；车头已经过线的（绿灯尾巴上进来的）就停在车道尽头，总之不带着冲突进路口
+      if (toEnd < 30 && this.#boxConflict(car, lane)) limit(toLine > 0 ? toLine : toEnd - 0.3, 'boxConflict')
+      for (const o of this.cars) {
+        if (o.mode !== 'turn' || o.turn.from !== lane) continue
+        limit(toEnd + o.turn.u * o.turn.len - CAR_LEN - 2.2, 'boxFull') // 和它保持一个车身 + 2.2m，和车道内跟车一样
+      }
       let blocked = entryFull ? 'entryFull' : ''
       if (node.roundabout) {
         // 进环岛让环内车先行（实施条例第51条）；环内车不用让
@@ -564,7 +581,6 @@ export class Traffic {
       // 转弯让行人: 绿灯时先进路口、在出口斑马线前等（见 #updateTurn），不占着停车线堵后车；只有红灯右转才要求出口斑马线先清空
       const exitCw = car.nextPlan.lane.crosswalks[0]
       const exitPeds = car.move !== 'S' && exitCw && exitCw.s < 25 && this.crowd && this.crowd.countNear(exitCw.cw.center[0], exitCw.cw.center[1], exitCw.cw.span / 2, true) > 0
-      const toLine = lane.stopS - (car.s + CAR_LEN / 2)
       if (toLine > -0.5) { // 车头已过停车线就不再管灯
         if (signalized && !car.rtor) {
           const st = this.signals.state(lane.way.to, lane.way.edgeIndex)
@@ -586,13 +602,87 @@ export class Traffic {
 
     if (car.s >= lane.len) {
       lane.cars.splice(lane.cars.indexOf(car), 1)
+      this.#dropGhost(car)
+      car.lat = 0
+      car.passing = null
       if (!car.nextPlan) return this.#remove(car)
       this.#startTurn(car)
-    } else samplePolyline(lane.pts, lane.cum, car.s, car)
+    } else {
+      samplePolyline(lane.pts, lane.cum, car.s, car)
+      if (car.lat !== 0) { // 变道中: 横向偏差逐渐归零，车身基本离开原车道后撤掉占位
+        const step = LANE_CHANGE_V * dt
+        car.lat = Math.abs(car.lat) <= step ? 0 : car.lat - Math.sign(car.lat) * step
+        if (car.ghost) {
+          car.ghost.s = this.#mapS(lane, car.ghost.lane, car.s)
+          car.ghost.v = car.v
+          if (Math.abs(car.lat) < 1.2) this.#dropGhost(car)
+        }
+      }
+    }
   }
 
-  #startTurn(car) {
-    const a = car.lane, b = car.nextPlan.lane
+  /** 同一条路上，把弧长换算到另一条车道（各车道长度略有差别） */
+  #mapS(from, to, sv) { return (sv / from.len) * to.len }
+
+  #laneFree(lane, sv, back, front) { return !lane.cars.some((c) => c.s > sv - back && c.s < sv + front) }
+
+  /** 变到同一条路的第 k 条车道。逻辑上立刻换过去，画面上用 lat 慢慢横移；原车道留一个「占位」直到车身基本离开 */
+  #changeLane(car, k) {
+    const from = car.lane, to = from.way.lanes[k]
+    const sv = this.#mapS(from, to, car.s)
+    const i = from.cars.indexOf(car)
+    car.ghost = { s: car.s, v: car.v, isGhost: true, owner: car, lane: from }
+    from.cars[i] = car.ghost
+    const j = to.cars.findIndex((c) => c.s > sv)
+    if (j < 0) to.cars.push(car)
+    else to.cars.splice(j, 0, car)
+    car.lat += to.off > from.off ? -(to.off - from.off) : from.off - to.off // 换完车道后，相对新车道中心线的横向偏差（右为正）
+    car.lane = to
+    car.s = sv
+  }
+
+  #dropGhost(car) {
+    if (!car.ghost) return
+    const l = car.ghost.lane, i = l.cars.indexOf(car.ghost)
+    if (i >= 0) l.cars.splice(i, 1)
+    car.ghost = null
+  }
+
+  /** 超车决策。只在路段中间做；guide lane 是按下个路口的转向选的，所以超完要回原车道 */
+  #considerOvertake(car, leader, toEnd) {
+    const lane = car.lane, way = lane.way
+    if (way.n < 2 || way.roundabout || car.lat !== 0 || car.takeRamp || car.parkAt || car.push > 0) return
+    if (car.passing) {
+      // 已经超过去并拉开 12m 以上、右侧有空档 → 驶回原车道；快到路口了还没回去就放宽空档要求
+      const home = way.lanes[car.homeK]
+      const sv = this.#mapS(lane, home, car.s)
+      const cleared = !car.passing.lane || car.passing.lane !== home || !home.cars.includes(car.passing) || this.#mapS(lane, home, car.s) - car.passing.s > CAR_LEN + 12
+      const urgent = toEnd < 60
+      if ((cleared || urgent) && this.#laneFree(home, sv, urgent ? 8 : 12, urgent ? 8 : 14)) {
+        this.#changeLane(car, car.homeK)
+        car.passing = null
+        car.homeK = -1
+      }
+      return
+    }
+    if (!leader || leader.isGhost || toEnd < 90 || car.s < 20) return
+    const gap = leader.s - car.s - CAR_LEN
+    if (gap > 22 || leader.v > car.vmax - 1.8 || leader.v < 0.5) return // 前车不慢、或是停着等灯/等人 → 不超
+    const k = lane.k - 1 // 左侧 = 更靠内的车道
+    if (k < 0 || way.reserved === k) return
+    const left = way.lanes[k]
+    const sv = this.#mapS(lane, left, car.s)
+    if (!this.#laneFree(left, sv, 12, 26)) return
+    car.homeK = lane.k
+    car.passing = leader
+    this.#changeLane(car, k)
+  }
+
+  /** 从车道 a 的尽头到车道 b 的起点的路口内轨迹（二次贝塞尔）。按车道对缓存，附带采样点供冲突检测用 */
+  #turnPath(a, b) {
+    const key = a.id + '>' + b.id
+    let path = this.turnPaths.get(key)
+    if (path) return path
     const p0 = a.pts[a.pts.length - 1], p2 = b.pts[0]
     const d0 = dirAt(a.pts, a.pts.length - 1), d2 = dirAt(b.pts, 1)
     // 控制点取两条切线的交点；近乎平行（直行）时退化成中点
@@ -600,33 +690,102 @@ export class Traffic {
     const cross = d0[0] * d2[1] - d0[1] * d2[0]
     if (Math.abs(cross) > 0.2) {
       const t = ((p2[0] - p0[0]) * d2[1] - (p2[1] - p0[1]) * d2[0]) / cross
-      if (t > 0 && t < Math.hypot(p2[0] - p0[0], p2[1] - p0[1]) * 1.5) p1 = [p0[0] + d0[0] * t, p0[1] + d0[1] * t]
+      if (t > 0 && t < Math.hypot(p2[0] - p0[0], p2[1] - p0[1]) * 1.5) {
+        const c = [p0[0] + d0[0] * t, p0[1] + d0[1] * t]
+        if ((c[0] - p2[0]) * d2[0] + (c[1] - p2[1]) * d2[1] < 0) p1 = c // 交点要在出口车道起点的后方，否则曲线会冲过头再绕回来
+      }
     }
+    const N = 12, samples = []
     let len = 0, prev = p0
-    for (let k = 1; k <= 8; k++) { const q = bezier(p0, p1, p2, k / 8); len += Math.hypot(q[0] - prev[0], q[1] - prev[1]); prev = q }
+    for (let k = 0; k <= N; k++) {
+      const q = bezier(p0, p1, p2, k / N)
+      len += Math.hypot(q[0] - prev[0], q[1] - prev[1])
+      prev = q
+      samples.push(q)
+    }
+    path = { p0, p1, p2, len: Math.max(len, 1), samples }
+    this.turnPaths.set(key, path)
+    return path
+  }
+
+  /**
+   * 进路口前的冲突检查: 我的轨迹和路口里其他车「还没走完的那段」轨迹有没有相交（< 2.6m）。
+   * 有就在停车线后等 —— 左转的车因此会等对向直行的车先过（转弯让直行），交叉方向的车也不会在路口中间叠在一起。
+   * 同一条车道出来的前车不算（那是跟车关系，另有间距控制）。
+   */
+  #boxConflict(car, lane) {
+    const mine = this.#turnPath(lane, car.nextPlan.lane).samples
+    for (const o of this.cars) {
+      if (o === car || o.mode !== 'turn' || o.turn.node !== lane.way.to || o.turn.from === lane) continue
+      const theirs = o.turn.path.samples
+      const k0 = Math.max(0, Math.floor(o.turn.u * (theirs.length - 1)) - 1)
+      for (let i = k0; i < theirs.length; i++) {
+        for (const q of mine) {
+          const dx = q[0] - theirs[i][0], dy = q[1] - theirs[i][1]
+          if (dx * dx + dy * dy < 6.8) return true
+        }
+      }
+    }
+    return false
+  }
+
+  #startTurn(car) {
+    const a = car.lane, b = car.nextPlan.lane
+    const path = this.#turnPath(a, b)
     car.mode = 'turn'
-    car.turn = { p0, p1, p2, len: Math.max(len, 1), u: 0, node: a.way.to, fromRing: a.way.roundabout }
+    car.turn = { ...path, path, u: 0, node: a.way.to, fromRing: a.way.roundabout, from: a }
     this.nodes[a.way.to].busy = car
   }
 
   #updateTurn(car, dt) {
     const t = car.turn
-    let want = V_TURN
+    let want = car.move === 'S' ? Math.min(car.vmax, 6.5) : V_TURN // 直行过路口不用降到转弯速度
     // 出口斑马线上有行人 → 停在斑马线前（转弯让行人）
     const exitCw = car.nextPlan.lane.crosswalks[0]
     if (exitCw && exitCw.s < 25 && this.crowd && car.push <= 0) {
       const d = (1 - t.u) * t.len + exitCw.s - exitCw.cw.depth / 2 - 1.0 - CAR_LEN / 2
       if (d > -1 && d < 12 && this.crowd.countNear(exitCw.cw.center[0], exitCw.cw.center[1], exitCw.cw.span / 2, true) > 0) want = Math.min(want, Math.sqrt(Math.max(0, 6 * d)))
     }
-    // 路口里前方 7m 内有别的转弯车 → 等它先走（谁进度靠前谁先走，避免互相等死）
+    // —— 路口里要让的车（车有车长，不能叠上去）。被车挡住和被行人挡住要分开记:
+    //    只有「等行人等太久」才允许缓慢挤过去，被车挡住永远不能硬挤，否则就会开到前车身上 ——
+    let carBlock = false
+    // 1) 目标车道入口处的车（多半正停在出口斑马线前等行人）: 按正常跟车间距停在它后面
+    const lead = car.nextPlan.lane.cars[0]
+    if (lead) {
+      const gapT = (1 - t.u) * t.len + lead.s - CAR_LEN - 2.2
+      want = Math.min(want, Math.sqrt(Math.max(0, 6 * gapT)))
+      if (gapT < 1) carBlock = true
+      if (gapT < 0.3) want = 0
+    }
+    // 2) 转弯轨迹会擦过相邻车道的入口: 目标道路各车道入口附近、就在车头前方的车也要让
+    for (const l of car.nextPlan.lane.way.lanes) {
+      for (const o of l.cars) {
+        if (o.s > 14) break
+        if (o.isGhost || o === lead) continue
+        const ox = o.x - car.x, oy = o.y - car.y
+        if (ox * ox + oy * oy < 42 && ox * car.dx + oy * car.dy > 0.8) { want = 0; carBlock = true }
+      }
+    }
+    // 3) 路口里的其他车。先后次序统一按「离出口还剩多远」排（剩得少的先走），只有一个全序，不会互相等死:
+    //    · 要并入同一条出口车道的: 不管从哪个方向来，都按次序排队，保持一个车身的间距（否则会同时挤进车道入口叠在一起）
+    //    · 轨迹交叉的: 对方就在车头前方 7m 内且次序靠前 → 停下等它过去
+    const myRem = (1 - t.u) * t.len
     for (const o of this.cars) {
       if (o === car || o.mode !== 'turn' || o.turn.node !== t.node) continue
+      const oRem = (1 - o.turn.u) * o.turn.len
+      if (!(oRem < myRem || (oRem === myRem && this.cars.indexOf(o) < this.cars.indexOf(car)))) continue
+      if (o.nextPlan.lane === car.nextPlan.lane) {
+        const g = myRem - oRem - CAR_LEN - 2.2
+        want = Math.min(want, Math.sqrt(Math.max(0, 6 * g)))
+        if (g < 1) carBlock = true
+        if (g < 0.3) want = 0
+      }
       const ox = o.x - car.x, oy = o.y - car.y
-      if (ox * ox + oy * oy < 49 && ox * car.dx + oy * car.dy > 1 && o.turn.u >= t.u) { want = 0; break }
+      if (ox * ox + oy * oy < 49 && ox * car.dx + oy * car.dy > 0.8) { want = 0; carBlock = true }
     }
-    car.wait = want < 0.3 ? car.wait + dt : 0
+    car.wait = want < 0.3 && !carBlock ? car.wait + dt : 0
     if (car.wait > 6) { car.push = 4; car.wait = 0 }
-    if (car.push > 0) { car.push -= dt; want = Math.max(want, 2) }
+    if (car.push > 0) { car.push -= dt; if (!carBlock) want = Math.max(want, 2) }
     car.v += THREE.MathUtils.clamp(want - car.v, -BRAKE * dt, ACCEL * dt)
     t.u += (car.v * dt) / t.len
     if (t.u >= 1) {
@@ -782,9 +941,10 @@ export class Traffic {
       arr[o] = c.dx * s; arr[o + 1] = c.mode === 'ramp' ? (c.slope || 0) * s : 0; arr[o + 2] = c.dy * s; arr[o + 3] = 0
       arr[o + 4] = 0; arr[o + 5] = s; arr[o + 6] = 0; arr[o + 7] = 0
       arr[o + 8] = -c.dy * s; arr[o + 9] = 0; arr[o + 10] = c.dx * s; arr[o + 11] = 0
-      arr[o + 12] = c.x
+      const lx = c.lat ? -c.dy * c.lat : 0, lz = c.lat ? c.dx * c.lat : 0 // 右 = (-dy, dx)
+      arr[o + 12] = c.x + lx
       arr[o + 13] = c.mode === 'ramp' ? (c.h || 0) + 0.02 : c.level ? ELEVATED_H + 0.02 : (c.mode === 'path' || c.mode === 'waiting') && this.nav.surfaceAt(c.x, c.y) === SURFACE.PAVE ? CURB_H + 0.02 : 0.02
-      arr[o + 14] = c.y; arr[o + 15] = 1
+      arr[o + 14] = c.y + lz; arr[o + 15] = 1
     }
     this.mesh.count = n
     this.mesh.instanceMatrix.needsUpdate = true
