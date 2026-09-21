@@ -4,8 +4,9 @@ import CityScene from './components/CityScene.vue'
 
 // 角落里这一小条只是调试用的开关，正式接入时删掉即可，CityScene 本身不带任何 UI。
 // ?scene=xxx 可切换 public/scenes/xxx.json
-const sceneName = new URLSearchParams(location.search).get('scene') || 'demo'
-const SCENES = [{ id: 'demo', t: '街区' }, { id: 'district', t: '城区' }]
+// 默认打开城区（环形高架、地铁、铁路、场馆、人群作息都在这个场景里）；街区是早期的小场景，没有这些
+const sceneName = new URLSearchParams(location.search).get('scene') || 'district'
+const SCENES = [{ id: 'district', t: '城区' }, { id: 'demo', t: '街区' }]
 const gotoScene = (id) => (location.search = '?scene=' + id)
 const heat = ref(true)
 const base = ref(600)

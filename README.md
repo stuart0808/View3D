@@ -13,15 +13,16 @@
 
 ```bash
 npm install
-npm run dev            # http://localhost:5173/          示例场景
-                       # http://localhost:5173/?scene=my  加载 public/scenes/my.json
+npm run dev            # http://localhost:5173/              城区示例（默认）
+                       # http://localhost:5173/?scene=demo   街区示例（早期的小场景，没有轨道交通和场馆）
+                       # http://localhost:5173/?scene=my     加载 public/scenes/my.json
 ```
 
 操作：左键拖动旋转、右键拖动平移、滚轮缩放；**点击一栋楼**进入室内视图（商场一层 / 地下车库 B1），Esc 退出。
 
 ## 两个示例场景
 
-| | 街区 `?scene=demo` | 城区 `?scene=district` |
+| | 街区 `?scene=demo` | 城区（默认）`?scene=district` |
 |---|---|---|
 | 范围 | 600m × 440m，0.2 m/px | 2.4km × 1.7km，0.5 m/px（中央嵌着街区） |
 | 生成 | `make_demo_map.py` | `make_district_map.py`（另出一个 sidecar json） |
