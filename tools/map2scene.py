@@ -6,7 +6,9 @@ map2scene.py —— 把「涂了色块标记的二维地图图片」转换成前
 标记约定（默认调色板，可用 --markers 覆盖，见 markers.default.json）:
     红   #FF0000  商铺建筑（2 层）          —— 填充色块
     橙   #FF8000  商铺建筑（1 层）          —— 填充色块
-    品红 #FF00FF  非商铺建筑/高楼（5 层）    —— 填充色块
+    品红 #FF00FF  写字楼/非商铺高楼          —— 填充色块（层数按占地面积自动取 6~28 层）
+    春绿 #00FF80  住宅楼                    —— 填充色块（9~18 层）
+    黄绿 #80FF00  活动场馆（体育场、剧院…）   —— 填充色块，形状随意；名称/类型/容量写在 --sidecar 里
     蓝   #0000FF  车行道                    —— 填充色块（环岛不用特别标: 画成一个圆环，脚本会自动认出来）
     玫红 #FF0080  高架路                    —— 填充色块，直接盖在地面道路上画；不与地面道路相交，两端通到图外
     绿   #00FF00  绿化带/草坪（不可走，种树） —— 填充色块
@@ -40,6 +42,8 @@ DEFAULT_MARKERS = [
     {"color": "#FF0000", "layer": "building", "kind": "shop", "floors": 2},
     {"color": "#FF8000", "layer": "building", "kind": "shop", "floors": 1},
     {"color": "#FF00FF", "layer": "building", "kind": "block", "floors": 5},
+    {"color": "#00FF80", "layer": "building", "kind": "residential", "floors": 11},
+    {"color": "#80FF00", "layer": "building", "kind": "venue", "floors": 4},
     {"color": "#0000FF", "layer": "road"},
     {"color": "#FF0080", "layer": "elevated"},
     {"color": "#00FF00", "layer": "area", "kind": "green"},
@@ -87,19 +91,21 @@ def classify(img, markers, tol, min_sat=70):
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     alpha = img[..., 3] if img.shape[2] == 4 else None
-    rgb = img[..., 2::-1].astype(np.int32)
-    h, w = rgb.shape[:2]
+    h, w = img.shape[:2]
     best = np.full((h, w), -1, np.int16)
-    best_d = np.full((h, w), tol * tol, np.int32)
-    for i, m in enumerate(markers):
-        c = np.array(hex_to_rgb(m["color"]), np.int32)
-        d = ((rgb - c) ** 2).sum(-1)
-        hit = d < best_d
-        best[hit] = i
-        best_d[hit] = d[hit]
+    cols = [np.array(hex_to_rgb(m["color"]), np.int32) for m in markers]
+    for y0 in range(0, h, 512):  # 按行分块: 几千万像素的城区图一次算完要吃好几个 G 内存
+        rgb = img[y0:y0 + 512, :, 2::-1].astype(np.int32)
+        b_ = best[y0:y0 + 512]
+        best_d = np.full(rgb.shape[:2], tol * tol, np.int32)
+        for i, c in enumerate(cols):
+            d = ((rgb - c) ** 2).sum(-1)
+            hit = d < best_d
+            b_[hit] = i
+            best_d[hit] = d[hit]
+        b_[(rgb.max(-1) - rgb.min(-1)) < min_sat] = -1
     if alpha is not None:
         best[alpha < 128] = -1
-    best[(rgb.max(-1) - rgb.min(-1)) < min_sat] = -1
     return best
 
 
@@ -550,6 +556,7 @@ def main():
     ap.add_argument("--site-margin-m", type=float, default=6.0, help="地块外包络向外扩的人行边（米）")
     ap.add_argument("--door-spacing-m", type=float, default=14.0, help="自动店门间距（米）")
     ap.add_argument("--crosswalk-spacing-m", type=float, default=90.0, help="长路段中途补斑马线的间距（米），0=不补")
+    ap.add_argument("--sidecar", help="附带的 json: 标记图上画不了的东西 —— 轨道交通线路/车站、场馆信息、逐人仿真的核心区范围（像素坐标）")
     ap.add_argument("--debug", help="输出叠加了识别结果的预览图")
     args = ap.parse_args()
 
@@ -632,8 +639,14 @@ def main():
         ang = dominant_angle([shell])
         if ang_diff90(ang, g_ang) < math.radians(7):
             ang = g_ang
-        poly = ortho_building(shell, holes, ang, not args.no_ortho)
-        buildings.append(dict(id=f"b{k + 1}", kind=mk.get("kind", "shop"), floors=mk.get("floors", 2), angle=ang, geom=poly))
+        kind = mk.get("kind", "shop")
+        poly = ortho_building(shell, holes, ang, not args.no_ortho and kind != "venue")  # 场馆多是椭圆、异形，保持原样
+        floors = mk.get("floors", 2)
+        if kind == "block":
+            floors = int(min(28, 6 + poly.area // 260 + (k * 7) % 5))
+        elif kind == "residential":
+            floors = 9 + (k * 5) % 10
+        buildings.append(dict(id=f"b{k + 1}", kind=kind, floors=floors, angle=ang, geom=poly))
     b_union = unary_union([b["geom"] for b in buildings]) if buildings else Polygon()
 
     # ---------------- 道路 / 地块 / 人行铺装 ----------------
@@ -956,6 +969,28 @@ def main():
         walk_free = walk_free.difference(isl)
         walk_prep = prep(walk_free)
 
+    # ---------------- sidecar: 核心区 / 场馆 / 轨道交通 ----------------
+    side = json.loads(Path(args.sidecar).read_text("utf-8")) if args.sidecar else {}
+    region = None
+    if side.get("activeRegion"):
+        (rx0, ry0), (rx1, ry1) = to_m(side["activeRegion"][:2]), to_m(side["activeRegion"][2:])
+        region = Polygon([(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1)])
+    in_region = (lambda g_: region is None or region.intersects(g_))
+    for v in side.get("venues", []):
+        cands = [b for b in buildings if b["kind"] == "venue"]
+        if cands:
+            pt = Point(*to_m(v["at"]))
+            best_b = min(cands, key=lambda b: b["geom"].distance(pt))
+            best_b["venue"] = {k_: v[k_] for k_ in ("name", "type", "capacity") if k_ in v}
+    transit = None
+    if side.get("transit"):
+        transit = {"lines": []}
+        for ln in side["transit"]["lines"]:
+            transit["lines"].append({**{k_: ln[k_] for k_ in ("id", "name", "kind", "color") if k_ in ln}, "loop": bool(ln.get("loop")),
+                                     "points": [[round(float(v_), 2) for v_ in to_m(q)] for q in ln["points"]],
+                                     "stations": [{"name": st["name"], "pos": [round(float(v_), 2) for v_ in to_m(st["at"])]} for st in ln.get("stations", [])]})
+        log(f"轨道交通 {len(transit['lines'])} 条线, {sum(len(l['stations']) for l in transit['lines'])} 个车站")
+
     # ---------------- 店门 ----------------
     doors = []
 
@@ -989,7 +1024,30 @@ def main():
     marked = {d["building"] for d in doors}
     auto_n = 0
     for b in buildings:
-        if b["kind"] != "shop" or b["id"] in marked:
+        if b["id"] in marked or not in_region(b["geom"]):
+            continue  # 核心区以外不逐人仿真，不需要门
+        if b["kind"] == "venue":  # 场馆: 沿周长每 30m 一个出入口（椭圆轮廓的边都很短，不能按边来布）
+            ext = b["geom"].exterior
+            for j in range(max(4, int(ext.length // 30))):
+                s_ = ext.length * (j + 0.5) / max(4, int(ext.length // 30))
+                q, q1, q2 = (np.array(ext.interpolate(v_ % ext.length).coords[0]) for v_ in (s_, s_ - 0.5, s_ + 0.5))
+                n = edge_normal_outward(b["geom"], q1, q2)
+                if walk_prep.contains(Point(*(q + n * 3.0))):
+                    doors.append(dict(building=b["id"], pos=q, normal=n))
+                    auto_n += 1
+            continue
+        if b["kind"] != "shop":  # 写字楼 / 住宅: 最长的一两条临街边各开一个门
+            co = np.asarray(b["geom"].exterior.coords)
+            edges_ = sorted(zip(co[:-1], co[1:]), key=lambda e_: -float(np.hypot(*(e_[1] - e_[0]))))
+            made = 0
+            for a, c in edges_:
+                if made >= 2 or float(np.hypot(*(c - a))) < 8:
+                    break
+                n = edge_normal_outward(b["geom"], a, c)
+                if walk_prep.contains(Point(*((a + c) / 2 + n * 2.5))):
+                    doors.append(dict(building=b["id"], pos=(a + c) / 2, normal=n))
+                    auto_n += 1
+                    made += 1
             continue
         co = np.asarray(b["geom"].exterior.coords)
         for a, c in zip(co[:-1], co[1:]):
@@ -1013,6 +1071,14 @@ def main():
         if not walk_prep.contains(Point(*q)):
             q = np.array(nearest_points(walk_free, Point(*q))[0].coords[0])
         portals.append(dict(pos=q, weight=1.0))
+    if region is not None:
+        ring_ = region.exterior
+        for j in range(int(ring_.length // 45)):
+            q = np.array(ring_.interpolate(j * 45.0).coords[0])
+            c_ = np.array(region.centroid.coords[0])
+            q_in = q + (c_ - q) / max(np.hypot(*(c_ - q)), 1e-9) * 4.0
+            if walk_prep.contains(Point(*q_in)):
+                portals.append(dict(pos=q_in, weight=0.5))
     if not portals and not walk_free.is_empty:
         minx, miny, maxx, maxy = site.bounds
         mx, my = (minx + maxx) / 2, (miny + maxy) / 2
@@ -1025,15 +1091,18 @@ def main():
     r2 = lambda v: [round(float(v[0]), 2), round(float(v[1]), 2)]
     minx, miny, maxx, maxy = site.bounds
     scene = {
-        "version": 3,
+        "version": 4,
         "units": "m",
         "source": Path(args.image).name,
         "angle": round(g_ang, 5),
         "bounds": {"minX": round(minx, 2), "minY": round(miny, 2), "maxX": round(maxx, 2), "maxY": round(maxy, 2)},
+        **({"activeRegion": dict(zip(("minX", "minY", "maxX", "maxY"), (round(v_, 2) for v_ in region.bounds)))} if region is not None else {}),
+        **({"transit": transit} if transit else {}),
         "site": geom_to_json(site),
         "pavement": geom_to_json(pavement),
         "buildings": [
             {"id": b["id"], "kind": b["kind"], "floors": b["floors"], "angle": round(b["angle"], 5), "attraction": 1.0,
+             **({"venue": b["venue"]} if b.get("venue") else {}),
              **geom_to_json(b["geom"])[0]}
             for b in buildings if geom_to_json(b["geom"])
         ],
@@ -1075,7 +1144,7 @@ def write_debug(path, img, scene, to_px):
         cv2.polylines(vis, [P(a["polygon"])], True, tuple(int(c * 0.6) for c in AREA_COL.get(a["kind"], (180, 180, 180))), 2, cv2.LINE_AA)
     for e_ in scene.get("elevated", []):
         lay = vis.copy()
-        cv2.fillPoly(lay, [P(e_["polygon"])], (150, 90, 230))
+        cv2.fillPoly(lay, [P(e_["polygon"])] + [P(h) for h in e_["holes"]], (150, 90, 230))  # 环形高架是带孔的，孔要一起传进去才不会把环内涂满
         vis = cv2.addWeighted(lay, 0.45, vis, 0.55, 0)
     for s in scene["site"]:
         cv2.polylines(vis, [P(s["polygon"])], True, (60, 60, 60), 2, cv2.LINE_AA)
@@ -1103,6 +1172,16 @@ def write_debug(path, img, scene, to_px):
     for p in scene["portals"]:
         c = tuple(to_px(p["pos"]).round().astype(int))
         cv2.circle(vis, c, 8, (200, 180, 0), 2, cv2.LINE_AA)
+    for ln in (scene.get("transit") or {}).get("lines", []):
+        col = tuple(int(ln["color"].lstrip("#")[i:i + 2], 16) for i in (4, 2, 0))
+        cv2.polylines(vis, [P(ln["points"])], bool(ln.get("loop")), col, 4, cv2.LINE_AA)
+        for st in ln["stations"]:
+            c = tuple(to_px(st["pos"]).round().astype(int))
+            cv2.circle(vis, c, 11, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(vis, c, 11, col, 3, cv2.LINE_AA)
+    if scene.get("activeRegion"):
+        r = scene["activeRegion"]
+        cv2.rectangle(vis, tuple(to_px([r["minX"], r["minY"]]).round().astype(int)), tuple(to_px([r["maxX"], r["maxY"]]).round().astype(int)), (0, 0, 0), 3)
     imwrite_unicode(path, vis)
     log(f"预览图 {path}")
 

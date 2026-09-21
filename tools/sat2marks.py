@@ -42,9 +42,11 @@ CLASSES = [
     {"id": 8, "key": "plaza", "label": "广场", "color": "#FF80FF"},
     {"id": 9, "key": "parking", "label": "停车场", "color": "#8000FF"},
     {"id": 10, "key": "elevated", "label": "高架路", "color": "#FF0080"},
+    {"id": 11, "key": "residential", "label": "住宅楼", "color": "#00FF80"},
+    {"id": 12, "key": "venue", "label": "活动场馆", "color": "#80FF00"},
 ]
 DOT_COLORS = {"door": "#FFFF00", "portal": "#00FFFF"}
-BUILDING_IDS = {1, 2, 3}
+BUILDING_IDS = {1, 2, 3, 11, 12}
 
 
 def hex_bgr(h):

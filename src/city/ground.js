@@ -239,7 +239,9 @@ export function buildElevated(scene, style, railGaps = []) {
   for (const e of scene.elevated || []) {
     decks.push(toGround(new THREE.ExtrudeGeometry(makeShape(e.polygon, e.holes), { depth: 0.9, bevelEnabled: false }), ELEVATED_H - 0.9))
     // 护栏沿桥面轮廓一小段一小段地摆，匝道并线的地方（railGaps）跳过，车才不是「穿过护栏」上桥的
-    const ring = e.polygon, area = signedArea(ring)
+    for (const ring of [e.polygon, ...(e.holes || [])]) { // 环形高架有内孔，内外两圈都要有护栏
+    const isHole = ring !== e.polygon
+    const area = signedArea(ring) * (isHole ? -1 : 1) // 孔的「外侧」朝着孔里，法线要反过来
     for (let i = 0; i < ring.length; i++) {
       const p = ring[i], q = ring[(i + 1) % ring.length]
       const L = Math.hypot(q[0] - p[0], q[1] - p[1])
@@ -256,6 +258,7 @@ export function buildElevated(scene, style, railGaps = []) {
         b.translate(cx, ELEVATED_H + 0.5, cy)
         rails.push(b)
       }
+    }
     }
   }
   for (const lane of scene.lanes || []) {
