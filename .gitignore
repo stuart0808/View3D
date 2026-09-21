@@ -1,0 +1,10 @@
+node_modules
+dist
+__pycache__
+.venv
+
+# 模型权重（首次运行自动下载）
+*.pt
+
+# 样例图都可以重新生成（make_demo_map.py），卫星样例图有第三方版权，不进仓库
+tools/samples/

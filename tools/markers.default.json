@@ -1,0 +1,61 @@
+[
+  {
+    "color": "#FF0000",
+    "layer": "building",
+    "kind": "shop",
+    "floors": 2
+  },
+  {
+    "color": "#FF8000",
+    "layer": "building",
+    "kind": "shop",
+    "floors": 1
+  },
+  {
+    "color": "#FF00FF",
+    "layer": "building",
+    "kind": "block",
+    "floors": 5
+  },
+  {
+    "color": "#0000FF",
+    "layer": "road"
+  },
+  {
+    "color": "#FF0080",
+    "layer": "elevated"
+  },
+  {
+    "color": "#00FF00",
+    "layer": "area",
+    "kind": "green"
+  },
+  {
+    "color": "#008000",
+    "layer": "area",
+    "kind": "park"
+  },
+  {
+    "color": "#0080FF",
+    "layer": "area",
+    "kind": "water"
+  },
+  {
+    "color": "#FF80FF",
+    "layer": "area",
+    "kind": "plaza"
+  },
+  {
+    "color": "#8000FF",
+    "layer": "area",
+    "kind": "parking"
+  },
+  {
+    "color": "#FFFF00",
+    "layer": "door"
+  },
+  {
+    "color": "#00FFFF",
+    "layer": "portal"
+  }
+]
