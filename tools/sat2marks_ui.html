@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>sat2marks · 卫星图标注</title>
+<style>
+  :root { --bg: #14181f; --panel: #1d232d; --line: #2c3442; --fg: #d7dde7; --dim: #8893a3; --acc: #4f9cff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.45 system-ui, "Microsoft YaHei", sans-serif; overflow: hidden; }
+  #app { display: grid; grid-template-columns: 236px 1fr; grid-template-rows: 1fr 30px; height: 100%; }
+  #side { grid-row: 1 / 3; background: var(--panel); border-right: 1px solid var(--line); padding: 10px; overflow-y: auto; }
+  #side h3 { margin: 14px 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em; color: var(--dim); }
+  #side h3:first-child { margin-top: 0; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+  button, .btn { border: 1px solid var(--line); background: #252c38; color: var(--fg); border-radius: 6px; padding: 5px 8px; cursor: pointer; font: inherit; }
+  button:hover { border-color: #46536a; }
+  button.on { background: var(--acc); border-color: var(--acc); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .cls { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; margin: 3px 0; }
+  .cls i { width: 14px; height: 14px; border-radius: 3px; flex: none; border: 1px solid rgba(255,255,255,.25); }
+  .cls kbd, .tool kbd { margin-left: auto; color: var(--dim); font: 11px ui-monospace, monospace; }
+  .tool { display: flex; width: 100%; margin: 3px 0; }
+  input[type=range] { flex: 1; min-width: 0; }
+  input[type=number], input[type=text] { width: 74px; background: #12161c; border: 1px solid var(--line); color: var(--fg); border-radius: 5px; padding: 4px 6px; font: inherit; }
+  label.chk { display: flex; gap: 6px; align-items: center; margin: 4px 0; color: var(--fg); }
+  .hint { color: var(--dim); font-size: 12px; margin: 4px 0; }
+  #wrap { position: relative; overflow: hidden; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #status { background: var(--panel); border-top: 1px solid var(--line); padding: 0 12px; display: flex; gap: 16px; align-items: center; color: var(--dim); white-space: nowrap; overflow: hidden; }
+  #status b { color: var(--fg); font-weight: 500; }
+  #busy { color: #ffc53d; visibility: hidden; }
+  #busy.on { visibility: visible; }
+  #log { position: absolute; right: 12px; top: 12px; width: 440px; max-height: 80%; overflow: auto; background: rgba(20,24,31,.96); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: none; }
+  #log pre { white-space: pre-wrap; margin: 0 0 8px; color: var(--dim); font: 12px/1.5 ui-monospace, monospace; }
+  #log img { width: 100%; border-radius: 4px; }
+  #log a { color: var(--acc); }
+  .err { color: #ff7875; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h3>类别</h3>
+    <div id="classes"></div>
+    <button class="cls" data-cls="0"><i style="background:repeating-linear-gradient(45deg,#555 0 3px,#222 3px 6px)"></i>擦除<kbd>0</kbd></button>
+
+    <h3>工具</h3>
+    <button class="tool" data-tool="sam">点选分割<kbd>S</kbd></button>
+    <button class="tool" data-tool="polygon">多边形<kbd>P</kbd></button>
+    <button class="tool" data-tool="line">画路 / 粗线<kbd>L</kbd></button>
+    <div class="row"><span>线宽</span><input id="lineW" type="range" min="2" max="40" step="0.5" value="9" /><span id="lineWv">9m</span></div>
+    <button class="tool" data-tool="door">店门点<kbd>D</kbd></button>
+    <button class="tool" data-tool="portal">出入口点<kbd>O</kbd></button>
+    <button class="tool" data-tool="ruler">标尺（校准比例）<kbd>R</kbd></button>
+    <div class="row" id="rulerRow" style="display:none"><span>实际</span><input id="rulerM" type="number" min="1" step="0.1" placeholder="米" /><button id="rulerOk">设定</button></div>
+
+    <h3>选项</h3>
+    <label class="chk"><input id="instant" type="checkbox" /> 点选后立即确认</label>
+    <label class="chk"><input id="protect" type="checkbox" checked /> 不覆盖已标的建筑</label>
+    <div class="row" id="tolRow"><span>容差</span><input id="tol" type="range" min="3" max="40" value="10" /><span id="tolv">10</span></div>
+    <div class="row"><span>标记透明度</span><input id="alpha" type="range" min="0" max="1" step="0.05" value="0.55" /></div>
+
+    <h3>自动</h3>
+    <div class="row"><button id="autoVeg" style="flex:1">自动提取植被</button></div>
+    <div class="row"><span>阈值</span><input id="vegThr" type="range" min="0.02" max="0.2" step="0.01" value="0.06" /><span id="vegThrv">0.06</span></div>
+    <div class="row"><button id="clearCls" style="flex:1">清空当前类别</button></div>
+
+    <h3>输出</h3>
+    <div class="row"><button id="undo" style="flex:1">撤销 <kbd style="color:var(--dim)">Ctrl+Z</kbd></button></div>
+    <div class="row"><button id="save" style="flex:1">保存标记图</button></div>
+    <div class="row"><span>场景名</span><input id="sceneName" type="text" style="flex:1" /></div>
+    <label class="chk"><input id="siteFull" type="checkbox" /> 整张图都算地块</label>
+    <div class="row"><button id="makeScene" style="flex:1; background:#2b5fb8; border-color:#2b5fb8; color:#fff">生成场景 →</button></div>
+
+    <p class="hint">滚轮缩放 · 空格/中键拖动平移<br>点选: 左键加点，右键减点，Enter 确认，Esc 取消<br>多边形/线: 单击加点，Enter 或双击结束，Backspace 退一点</p>
+  </div>
+  <div id="wrap"><canvas id="cv"></canvas>
+    <div id="log"><div class="row" style="justify-content:space-between"><b>生成结果</b><button id="logClose">关闭</button></div><div id="logBody"></div></div>
+  </div>
+  <div id="status"><span id="busy">● 计算中…</span><span>后端 <b id="sBackend">-</b></span><span>比例 <b id="sMpp">-</b></span><span id="sPos"></span><span id="sMsg" style="color:var(--fg)"></span></div>
+</div>
+<script>
+const $ = (s) => document.querySelector(s)
+const cv = $('#cv'), ctx = cv.getContext('2d')
+const img = new Image()
+let state = null
+const labelCv = document.createElement('canvas'), labelCtx = labelCv.getContext('2d')
+const prevCv = document.createElement('canvas'), prevCtx = prevCv.getContext('2d')
+let view = { x: 0, y: 0, s: 1 }
+let tool = 'sam', cls = 1
+let samPts = [], shapePts = [], rulerPts = [], hasPreview = false
+let mouse = { x: 0, y: 0 }, panning = null, spaceDown = false, busyCount = 0
+
+const api = async (path, body) => {
+  $('#busy').classList.toggle('on', ++busyCount > 0)
+  try {
+    const r = await fetch(path, body ? { method: 'POST', body: JSON.stringify(body) } : undefined)
+    const j = await r.json()
+    if (j.error) msg(j.error, true)
+    return j
+  } catch (e) { msg(String(e), true); return { error: String(e) } }
+  finally { $('#busy').classList.toggle('on', --busyCount > 0) }
+}
+const msg = (t, err) => { const el = $('#sMsg'); el.textContent = t; el.className = err ? 'err' : '' }
+const toImg = (cx, cy) => [(cx - view.x) / view.s, (cy - view.y) / view.s]
+
+function loadImage(src) { return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src }) }
+
+async function init() {
+  state = await api('/state')
+  document.title = `sat2marks · ${state.name}`
+  $('#sBackend').textContent = state.backend
+  $('#sMpp').textContent = state.mpp.toFixed(3) + ' m/px'
+  $('#sceneName').value = state.name
+  $('#tolRow').style.display = state.isSam ? 'none' : 'flex'
+  const box = $('#classes')
+  state.classes.forEach((c, i) => {
+    const b = document.createElement('button')
+    b.className = 'cls'; b.dataset.cls = c.id
+    b.innerHTML = `<i style="background:${c.color}"></i>${c.label}<kbd>${i + 1}</kbd>`
+    box.appendChild(b)
+  })
+  document.querySelectorAll('.cls').forEach((b) => b.onclick = () => setCls(+b.dataset.cls))
+  document.querySelectorAll('.tool').forEach((b) => b.onclick = () => setTool(b.dataset.tool))
+  img.src = '/image'
+  await img.decode()
+  for (const c of [labelCv, prevCv]) { c.width = state.width; c.height = state.height }
+  await reloadLabels()
+  resize(); fit(); setCls(1); setTool('sam')
+}
+
+async function reloadLabels() {
+  const im = await loadImage('/labels.png?' + Date.now())
+  labelCtx.clearRect(0, 0, labelCv.width, labelCv.height)
+  labelCtx.drawImage(im, 0, 0)
+  draw()
+}
+async function applyPatch(p) {
+  if (!p) return
+  const im = await loadImage('data:image/png;base64,' + p.png)
+  const [x, y, w, h] = p.bbox
+  labelCtx.clearRect(x, y, w, h)
+  labelCtx.drawImage(im, x, y)
+  draw()
+}
+
+function setCls(c) { cls = c; document.querySelectorAll('.cls').forEach((b) => b.classList.toggle('on', +b.dataset.cls === c)) }
+function setTool(t) {
+  cancel()
+  tool = t
+  document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('on', b.dataset.tool === t))
+  $('#rulerRow').style.display = t === 'ruler' ? 'flex' : 'none'
+  cv.style.cursor = 'crosshair'
+}
+function cancel() { samPts = []; shapePts = []; rulerPts = []; clearPreview(); draw() }
+function clearPreview() { hasPreview = false; prevCtx.clearRect(0, 0, prevCv.width, prevCv.height) }
+
+function resize() {
+  const r = $('#wrap').getBoundingClientRect(), d = devicePixelRatio || 1
+  cv.width = r.width * d; cv.height = r.height * d
+  draw()
+}
+function fit() {
+  const r = $('#wrap').getBoundingClientRect()
+  view.s = Math.min(r.width / state.width, r.height / state.height) * 0.96
+  view.x = (r.width - state.width * view.s) / 2
+  view.y = (r.height - state.height * view.s) / 2
+  draw()
+}
+
+function draw() {
+  if (!state) return
+  const d = devicePixelRatio || 1
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.fillStyle = '#0d1015'; ctx.fillRect(0, 0, cv.width, cv.height)
+  ctx.setTransform(view.s * d, 0, 0, view.s * d, view.x * d, view.y * d)
+  ctx.imageSmoothingEnabled = view.s < 2
+  ctx.drawImage(img, 0, 0)
+  ctx.globalAlpha = +$('#alpha').value
+  ctx.drawImage(labelCv, 0, 0)
+  ctx.globalAlpha = 1
+  if (hasPreview) { ctx.globalAlpha = 0.5; ctx.drawImage(prevCv, 0, 0); ctx.globalAlpha = 1 }
+
+  const px = 1 / view.s
+  const color = cls ? state.classes.find((c) => c.id === cls).color : '#fff'
+  // 进行中的多边形 / 线
+  if (shapePts.length) {
+    ctx.beginPath()
+    shapePts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)))
+    const [mx, my] = toImg(mouse.x, mouse.y)
+    ctx.lineTo(mx, my)
+    if (tool === 'line') {
+      ctx.lineWidth = +$('#lineW').value / state.mpp; ctx.lineCap = ctx.lineJoin = 'round'
+      ctx.strokeStyle = color; ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1
+    } else { ctx.closePath(); ctx.fillStyle = color; ctx.globalAlpha = 0.3; ctx.fill(); ctx.globalAlpha = 1 }
+    ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#fff'; ctx.stroke()
+    for (const [x, y] of shapePts) { ctx.fillStyle = '#fff'; ctx.fillRect(x - 2.5 * px, y - 2.5 * px, 5 * px, 5 * px) }
+  }
+  for (const [x, y, l] of samPts) dot(x, y, l ? '#38d97a' : '#ff4d4f', 5 * px, px)
+  for (const d0 of state.dots) dot(d0.x, d0.y, state.dotColors[d0.kind], 6 * px, px)
+  if (rulerPts.length) {
+    const a = rulerPts[0], b = rulerPts[1] || toImg(mouse.x, mouse.y)
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1])
+    ctx.lineWidth = 2 * px; ctx.strokeStyle = '#ffc53d'; ctx.stroke()
+  }
+}
+function dot(x, y, fill, r, px) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = fill; ctx.fill()
+  ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#000'; ctx.stroke()
+}
+
+// ---------------- 交互 ----------------
+cv.addEventListener('contextmenu', (e) => e.preventDefault())
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault()
+  const r = cv.getBoundingClientRect(), cx = e.clientX - r.left, cy = e.clientY - r.top
+  const k = Math.exp(-e.deltaY * 0.0015), ns = Math.min(40, Math.max(0.05, view.s * k))
+  view.x = cx - (cx - view.x) * (ns / view.s); view.y = cy - (cy - view.y) * (ns / view.s); view.s = ns
+  draw()
+}, { passive: false })
+cv.addEventListener('mousedown', (e) => {
+  const r = cv.getBoundingClientRect(), cx = e.clientX - r.left, cy = e.clientY - r.top
+  if (e.button === 1 || (e.button === 0 && spaceDown)) { panning = { cx, cy, x: view.x, y: view.y }; e.preventDefault(); return }
+  const [x, y] = toImg(cx, cy)
+  if (x < 0 || y < 0 || x >= state.width || y >= state.height) return
+  if (tool === 'sam') return samClick(x, y, e.button === 2 ? 0 : 1)
+  if (e.button !== 0) return
+  if (tool === 'polygon' || tool === 'line') { shapePts.push([x, y]); if (e.detail >= 2) finishShape(); else draw(); return }
+  if (tool === 'door' || tool === 'portal') return api('/dot', { kind: tool, x, y }).then((j) => { if (j.dots) { state.dots = j.dots; draw() } })
+  if (tool === 'ruler') {
+    rulerPts = rulerPts.length >= 2 ? [[x, y]] : [...rulerPts, [x, y]]
+    if (rulerPts.length === 2) { const d = Math.hypot(rulerPts[1][0] - rulerPts[0][0], rulerPts[1][1] - rulerPts[0][1]); msg(`量得 ${d.toFixed(1)} px ≈ ${(d * state.mpp).toFixed(1)} m（按当前比例）。填入实际米数后点「设定」`); $('#rulerM').focus() }
+    draw()
+  }
+})
+window.addEventListener('mousemove', (e) => {
+  const r = cv.getBoundingClientRect()
+  mouse = { x: e.clientX - r.left, y: e.clientY - r.top }
+  if (panning) { view.x = panning.x + mouse.x - panning.cx; view.y = panning.y + mouse.y - panning.cy }
+  const [x, y] = toImg(mouse.x, mouse.y)
+  $('#sPos').textContent = `${x.toFixed(0)}, ${y.toFixed(0)} px`
+  if (panning || shapePts.length || rulerPts.length === 1) draw()
+})
+window.addEventListener('mouseup', () => (panning = null))
+window.addEventListener('resize', resize)
+
+let samSeq = 0
+async function samClick(x, y, label) {
+  samPts.push([x, y, label]); draw()
+  const seq = ++samSeq
+  const j = await api('/sam', { points: samPts, cls, tol: +$('#tol').value })
+  if (seq !== samSeq) return // 期间又点了新的，丢弃旧结果
+  clearPreview()
+  if (j.error) return
+  if (j.empty) { msg('没分出东西，换个位置点，或加几个点'); draw(); return }
+  const im = await loadImage('data:image/png;base64,' + j.png)
+  const [bx, by] = j.bbox
+  prevCtx.drawImage(im, bx, by)
+  hasPreview = true
+  msg(`${j.area_m2} ㎡ · ${j.ms} ms　Enter 确认 / 右键减去多余部分 / Esc 取消`)
+  draw()
+  if ($('#instant').checked) commit()
+}
+async function commit() {
+  if (!hasPreview) return
+  const j = await api('/commit', { cls, protect: $('#protect').checked })
+  samPts = []; clearPreview()
+  if (j.patch) await applyPatch(j.patch); else draw()
+}
+async function finishShape() {
+  const pts = shapePts; shapePts = []
+  if (tool === 'polygon' && pts.length >= 3) await applyPatch((await api('/polygon', { cls, points: pts, protect: $('#protect').checked })).patch)
+  else if (tool === 'line' && pts.length >= 2) await applyPatch((await api('/polyline', { cls, points: pts, width_m: +$('#lineW').value, protect: $('#protect').checked })).patch)
+  draw()
+}
+async function undo() {
+  const j = await api('/undo', {})
+  if (j.dots) { state.dots = j.dots; draw() }
+  if (j.patch) await applyPatch(j.patch)
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') return
+  if (e.code === 'Space') { spaceDown = true; cv.style.cursor = 'grab'; e.preventDefault(); return }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); return undo() }
+  if (e.key === 'Enter') { e.preventDefault(); return tool === 'sam' ? commit() : finishShape() }
+  if (e.key === 'Escape') return cancel()
+  if (e.key === 'Backspace') { if (shapePts.length) shapePts.pop(); else if (samPts.length) { samPts.pop(); samPts.length ? samClickRefresh() : cancel() } draw(); return }
+  if (e.key === 'f' || e.key === 'F') return fit()
+  const t = { s: 'sam', p: 'polygon', l: 'line', d: 'door', o: 'portal', r: 'ruler' }[e.key.toLowerCase()]
+  if (t) return setTool(t)
+  if (/^[0-9]$/.test(e.key)) { const n = +e.key; if (n === 0) setCls(0); else if (state.classes[n - 1]) setCls(state.classes[n - 1].id) }
+})
+window.addEventListener('keyup', (e) => { if (e.code === 'Space') { spaceDown = false; cv.style.cursor = 'crosshair' } })
+async function samClickRefresh() { const last = samPts.pop(); await samClick(...last) }
+
+$('#lineW').oninput = (e) => { $('#lineWv').textContent = e.target.value + 'm'; draw() }
+$('#tol').oninput = (e) => ($('#tolv').textContent = e.target.value)
+$('#vegThr').oninput = (e) => ($('#vegThrv').textContent = e.target.value)
+$('#alpha').oninput = draw
+$('#undo').onclick = undo
+$('#rulerOk').onclick = async () => {
+  const m = +$('#rulerM').value
+  if (rulerPts.length !== 2 || !(m > 0)) return msg('先在图上点两个点，再填实际距离', true)
+  const d = Math.hypot(rulerPts[1][0] - rulerPts[0][0], rulerPts[1][1] - rulerPts[0][1])
+  const j = await api('/mpp', { mpp: m / d })
+  if (j.mpp) { state.mpp = j.mpp; $('#sMpp').textContent = j.mpp.toFixed(3) + ' m/px'; msg('比例已更新'); rulerPts = []; draw() }
+}
+$('#autoVeg').onclick = async () => {
+  const j = await api('/auto_veg', { thr: +$('#vegThr').value })
+  if (j.ok) { await reloadLabels(); msg(`植被: 绿化带 ${j.green_m2} ㎡，公园 ${j.park_m2} ㎡（不满意就 Ctrl+Z，调阈值重来）`) }
+}
+$('#clearCls').onclick = async () => { if (!cls) return; const j = await api('/clear_class', { cls }); if (j.ok) await reloadLabels() }
+$('#save').onclick = async () => { const j = await api('/export', {}); if (j.ok) msg('已保存 ' + j.marks) }
+$('#makeScene').onclick = async () => {
+  msg('生成中…')
+  const j = await api('/export', { scene: true, name: $('#sceneName').value.trim(), site: $('#siteFull').checked ? 'full' : 'auto' })
+  if (!j.ok) return
+  const ok = j.returncode === 0
+  $('#logBody').innerHTML = `<pre>${(j.log || '').replace(/</g, '&lt;')}</pre>` +
+    (ok ? `<p>场景: <code>${j.scene}</code><br>查看: <a target="_blank" href="http://localhost:5173/?scene=${encodeURIComponent(j.sceneName)}">http://localhost:5173/?scene=${j.sceneName}</a>（需先 npm run dev）</p>` : '<p class="err">转换失败，见上方日志</p>') +
+    (j.preview ? `<img src="/preview.png?${Date.now()}" />` : '')
+  $('#log').style.display = 'block'
+  msg(ok ? '场景已生成' : '转换失败', !ok)
+}
+$('#logClose').onclick = () => ($('#log').style.display = 'none')
+
+init()
+</script>
+</body>
+</html>
