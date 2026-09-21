@@ -74,7 +74,7 @@ const onReady = (engine) => (window.__city = engine)
     <button v-for="j in JUMPS" :key="j.t" @click="j.f(city.clock())">{{ j.t }}</button>
     <label><input v-model="heat" type="checkbox" /> 热力</label>
     <label>高峰人数 <input v-model.number="base" type="range" min="0" max="2000" step="50" /> {{ base }}</label>
-    <span v-if="stats" class="stat">街上 {{ stats.walking }} · 店内 {{ stats.inside }} · 车 {{ stats.cars }}</span>
+    <span v-if="stats" class="stat">街上 {{ stats.walking }} · 店内 {{ stats.inside }} · 车 {{ stats.cars }}<template v-if="stats.transit"> · 列车 {{ Object.values(stats.transit.trains).reduce((a, b) => a + b, 0) }}（{{ stats.transit.timetable === 'workday' ? '工作日' : '节假日' }}时刻表）</template></span>
   </div>
   <div class="debug-bar nav-bar">
     <button v-for="n in NAV" :key="n.t" :title="n.tip" @click="n.f">{{ n.t }}</button>

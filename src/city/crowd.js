@@ -107,7 +107,7 @@ export class Crowd {
     for (const p of scene.portals || []) {
       const cell = nav.nearestWalkable(p.pos[0], p.pos[1], 25)
       if (cell < 0) continue
-      this.dests.push({ type: 'portal', x: p.pos[0], y: p.pos[1], cell, c: nav.center(cell), field: null, weight: p.weight ?? 1 })
+      this.dests.push({ type: 'portal', x: p.pos[0], y: p.pos[1], cell, c: nav.center(cell), field: null, weight: p.weight ?? 1, station: p.station || null, queue: 0 })
     }
     // 公园、广场里撒一些「歇脚点」，人会走过去站一会儿再走
     for (const a of scene.areas || []) {
@@ -409,7 +409,22 @@ export class Crowd {
     this.hy[i] = best ? best[1] : dq.y
   }
 
+  /** 列车到站: 这一站的出入口排上 n 个人，接下来进场的人优先从这里出来（成批涌出，而不是均匀地从各个口冒出来） */
+  arrive(station, n) {
+    const ps = this.portals.filter((i) => this.dests[i].station === station)
+    for (const i of ps) this.dests[i].queue += n / ps.length
+  }
+
   #pickPortal() {
+    let qTotal = 0
+    for (const i of this.portals) qTotal += Math.max(0, this.dests[i].queue)
+    if (qTotal >= 1) {
+      let r = this.rand() * qTotal
+      for (const i of this.portals) {
+        r -= Math.max(0, this.dests[i].queue)
+        if (r <= 0) { this.dests[i].queue -= 1; return i }
+      }
+    }
     let total = 0
     for (const i of this.portals) total += this.dests[i].weight
     let r = this.rand() * total

@@ -6,6 +6,7 @@ import { buildGround, buildBackdrop } from './ground.js'
 import { buildBuildings, hiddenBuilding } from './buildings.js'
 import { Interior } from './interior.js'
 import { SimClock, activity, daylight } from './clock.js'
+import { Transit } from './transit.js'
 import { Crowd } from './crowd.js'
 import { HeatLayer } from './heat.js'
 import { Traffic } from './traffic.js'
@@ -116,7 +117,17 @@ export class CityEngine {
     this.buildingsGroup = group
     this.rand = rand
 
-    this.crowd = new Crowd(sceneData, this.nav, rand, { capacity: this.options.capacity, peopleScale: this.options.peopleScale, signals: this.signals })
+    if (sceneData.transit) {
+      this.transit = new Transit(sceneData, this.nav, this.clock)
+      world.add(this.transit.group)
+      // 列车到站 → 这一站的出入口放出一批人。人数取当前「应有人数」的缺口的一部分，总量仍然由日曲线决定
+      this.transit.onArrive = (station) => {
+        const gap = this.crowd ? this.crowd.population - this.crowd.active : 0
+        if (gap > 0) this.crowd.arrive(station, Math.min(80, Math.ceil(gap * 0.6)))
+      }
+    }
+    const withStations = { ...sceneData, portals: [...(sceneData.portals || []), ...(this.transit?.portals() || [])] } // 车站出入口也是人流出入口
+    this.crowd = new Crowd(withStations, this.nav, rand, { capacity: this.options.capacity, peopleScale: this.options.peopleScale, signals: this.signals })
     this._envTimer = 0
     this.crowd.dwellScale = this._dwellScale ?? 1
     world.add(this.crowd.mesh)
@@ -153,6 +164,8 @@ export class CityEngine {
     this.heat?.dispose()
     this.crowd?.dispose()
     this.traffic?.dispose()
+    this.transit?.dispose()
+    this.transit = null
     this.world = this.heat = this.crowd = this.nav = this.traffic = this.signals = null
   }
 
@@ -370,7 +383,7 @@ export class CityEngine {
   /** 仿真速度（倍）。0 = 暂停 */
   setRate(r) { this.clock.paused = r <= 0; if (r > 0) this.clock.setRate(r) }
 
-  stats() { return this.crowd ? { ...this.crowd.stats(), clock: this.clock.label, dayType: this.clock.dayType, cars: this.traffic?.roadCount ?? 0 } : null }
+  stats() { return this.crowd ? { ...this.crowd.stats(), clock: this.clock.label, dayType: this.clock.dayType, cars: this.traffic?.roadCount ?? 0, transit: this.transit?.stats() || null } : null }
 
   _resize() {
     const w = this.container.clientWidth || 1, h = this.container.clientHeight || 1
@@ -403,6 +416,7 @@ export class CityEngine {
         const last = i === n - 1
         if (crowdDt >= 0.5 || last) { this.crowd.update(crowdDt, last); crowdDt = 0 }
         if (this.crowd.ready) this.traffic?.update(step, last)
+        this.transit?.update(step, last)
       }
       if (this.heat && this.heatVisible) this.heat.update(dt, this.crowd.heatSamples, this.crowd.heatCount) // 热力的时间平滑按现实时间，倍速再高也不闪
     }
