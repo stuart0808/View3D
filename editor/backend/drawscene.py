@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-drawscene.py —— 场景编辑器（editor.html）画的矢量图 → scene.json。
+drawscene.py —— 场景编辑器（editor/，地址 /editor/）画的矢量图 → scene.json。
 
 不另写一套「矢量 → 路网」的逻辑，而是把矢量图画成和手工标记完全一样的标记图，交给现成的 map2scene:
 路网骨架、路口归正、斑马线、红绿灯、人行区域、店门、停车位……全部复用，行为和其他来源的场景一致。
@@ -35,7 +35,7 @@ from pathlib import Path
 import cv2  # 画标记图
 import numpy as np  # 坐标数组
 
-HERE = Path(__file__).resolve().parent  # tools/，找 map2scene.py 和调色板
+TOOLS = Path(__file__).resolve().parents[2] / "tools"  # 仓库的 tools/: map2scene.py 和标记调色板在那里
 LANE_W = 3.5  # 按车道数算路宽时每条车道的宽度（米）
 MAX_PX = 4000  # 标记图长边最多这么多像素，大画布自动降分辨率
 BUILDING_KINDS = {"shop", "block", "residential", "venue"}  # 和 map2scene / 前端 buildings.js 的 kind 一致
@@ -45,7 +45,7 @@ AREA_KINDS = {"green", "park", "water", "plaza", "parking"}
 def palette():
     """标记调色板: (layer, kind) → BGR 颜色；和 map2scene 读的是同一个文件，改颜色两边自动一致"""
     out = {}  # (layer, kind) → BGR
-    for m in json.loads((HERE / "markers.default.json").read_text("utf-8")):
+    for m in json.loads((TOOLS / "markers.default.json").read_text("utf-8")):
         h = m["color"].lstrip("#")
         rgb = tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))  # 十六进制颜色 → RGB
         out[(m["layer"], m.get("kind"))] = rgb[::-1]  # OpenCV 用 BGR
@@ -168,7 +168,7 @@ def build(d, out_json, work_dir=None):
     cv2.imencode(".png", img)[1].tofile(str(marks))  # tofile: Windows 中文路径也能写
     side_f.write_text(json.dumps(side), "utf-8")
     # 子进程跑 map2scene（和 autoscene 一样）: --site full 整张画布都是地块
-    cmd = [sys.executable, str(HERE / "map2scene.py"), str(marks), "-o", str(out_json), "--mpp", str(mpp), "--site", "full", "--sidecar", str(side_f)]
+    cmd = [sys.executable, str(TOOLS / "map2scene.py"), str(marks), "-o", str(out_json), "--mpp", str(mpp), "--site", "full", "--sidecar", str(side_f)]
     pr = subprocess.run(cmd, capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     if pr.returncode != 0:
         raise RuntimeError("map2scene 失败:\n" + pr.stderr.decode("utf-8", "replace")[-2000:])

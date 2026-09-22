@@ -1,10 +1,10 @@
 // 场景编辑器的纯逻辑（不碰 DOM，vitest 直接测）:
 //   矢量图      新建空白画布；把已有场景（scene.json）拆回可编辑的路 / 楼 / 区域
 //   几何        点到折线距离、命中测试（点选元素）、画路时吸附到已有道路、按住 Shift 取 45° 整数倍方向
-//   检查        生成前的问题清单（和后端 tools/drawscene.py 的 validate 同一套规则）
+//   检查        生成前的问题清单（和后端 editor/backend/drawscene.py 的 validate 同一套规则）
 // 坐标约定和 scene.json 一致: 原点在画布中心，单位米，x 向东、y 向南。
-// 矢量图格式见 tools/drawscene.py 文件头；后端把它画成标记图交给 map2scene，所以这里不管路口、斑马线这些。
-import { laneLayout } from '../city/roads.js' // 没指定车道数的路按路宽推，和前端车流同一套规则
+// 矢量图格式见 editor/backend/drawscene.py 文件头；后端把它画成标记图交给 map2scene，所以这里不管路口、斑马线这些。
+import { laneLayout } from '../../src/city/roads.js' // 没指定车道数的路按路宽推，和前端车流同一套规则
 
 export const LANE_W = 3.5 // 按车道数算路宽时每条车道的宽度（米），和后端一致
 

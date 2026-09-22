@@ -17,7 +17,8 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]  # 仓库根目录
-sys.path.insert(0, str(ROOT / "tools"))  # 让 import drawscene / map2scene 找得到
+sys.path.insert(0, str(ROOT / "tools"))  # map2scene / sat_server 在 tools/
+sys.path.insert(0, str(ROOT / "editor" / "backend"))  # drawscene 在编辑器自己的目录里
 import drawscene as ds  # noqa: E402
 import map2scene as m2s  # noqa: E402
 

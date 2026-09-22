@@ -1,15 +1,15 @@
 <script setup>
-// 场景编辑器（editor.html）: 在空白画布或卫星底图上画路、楼、绿地水面、店门和出入口，一键生成场景并在仿真里打开。
+// 场景编辑器（editor/index.html，地址 /editor/）: 在空白画布或卫星底图上画路、楼、绿地水面、店门和出入口，一键生成场景并在仿真里打开。
 //   画路     沿中心线点几下，双击 / 回车结束；每条路可设每方向车道数、单行（按画的方向行驶）、高架；端点自动吸附到已有道路
 //   画楼     点出轮廓，双击 / 回车闭合；类型（商铺 / 写字楼 / 住宅 / 场馆）和层数
 //   画区域   绿化带 / 公园 / 水体 / 广场 / 停车场
 //   点       店门（自动吸附到最近的外墙）、人流出入口
 //   选择     点选元素改属性、拖顶点改形状、Delete 删除；撤销 / 重做
-//   生成     矢量图交给导入服务（tools/sat_server.py → drawscene.py → map2scene.py），路口、斑马线、红绿灯、人行道自动生成
-// 打开方式: /editor.html（空白）、/editor.html?scene=<场景 id>（在已有场景上改）
+//   生成     矢量图交给导入服务（tools/sat_server.py → editor/backend/drawscene.py → tools/map2scene.py），路口、斑马线、红绿灯、人行道自动生成
+// 打开方式: /editor/（空白）、/editor/?scene=<场景 id>（在已有场景上改）
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue' // Vue 组合式 API
 import * as E from './model.js' // 矢量图的纯函数（几何、吸附、检查）
-import { snapToWall } from '../survey/model.js' // 店门吸附外墙沿用实地标注页的函数
+import { snapToWall } from '../../src/survey/model.js' // 店门吸附外墙沿用实地标注页的函数
 
 // ---------------------------------------------------------------------------
 // 矢量图 + 撤销 / 重做

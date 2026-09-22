@@ -1,6 +1,6 @@
-// 场景编辑器纯逻辑（src/editor/model.js）的测试: 路宽、已有场景拆成矢量图、命中测试、吸附、45° 取向、生成前检查、统计。
+// 场景编辑器纯逻辑（editor/src/model.js）的测试: 路宽、已有场景拆成矢量图、命中测试、吸附、45° 取向、生成前检查、统计。
 import { describe, it, expect } from 'vitest' // vitest 的断言
-import * as E from '../src/editor/model.js' // 被测模块
+import * as E from '../src/model.js' // 被测模块
 
 describe('路宽', () => { // 路宽规则
   it('按车道数算，双向乘 2；手填的优先', () => {

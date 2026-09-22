@@ -59,10 +59,10 @@
 - `tools/osm.py`: 经纬度网格 / Web 墨卡托截图两种地理参考、GCJ-02 换算、Overpass（缓存 + 备用服务器）、
   道路等级 → 路宽、长桥快速路当高架、路网与影像自动对齐
 
-### 场景编辑器（`editor.html`）
+### 场景编辑器（`editor/`，地址 `/editor/`）
 - 画路（每方向车道数、单行、高架，端点吸附已有道路）、楼（类型、层数）、区域、店门（贴墙）、出入口；选择、拖顶点、删除、撤销重做、本机自动保存
 - 可以在已有场景上改（路网、楼、区域拆成矢量图，带底图和经纬度），也可以从空白画布或本地底图开始
-- 生成: `tools/drawscene.py` 把矢量图画成标记图 + sidecar，交给 map2scene，路口 / 斑马线 / 红绿灯全部复用；导入服务加 `POST /api/draw/build`
+- 生成: `editor/backend/drawscene.py` 把矢量图画成标记图 + sidecar，交给 map2scene，路口 / 斑马线 / 红绿灯全部复用；导入服务加 `POST /api/draw/build`
 - map2scene: sidecar `roads` 按几何重合对到骨架边上，道路边和车道线带 `laneCount`，普通路也能单行
 - 前端 `laneLayout` 支持指定车道数，单行路不再限 2 条；三维页调试条加「编辑场景」入口
 

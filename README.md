@@ -96,16 +96,9 @@ python tools/eval_buildings.py --method roofnet   # 在评测场景上打分
 
 ## 场景编辑器：画出路和楼，直接生成场景
 
-在网页里画路、楼、绿地水面、店门和出入口，点一下就生成场景，并在仿真里打开。
+在网页里画路、楼、绿地水面、店门和出入口，点一下就生成场景并在仿真里打开。代码、测试和设计说明都在 `editor/` 目录，详见 [editor/README.md](editor/README.md)。
 
-- **打开方式。** 在三维页的调试条点「编辑场景」，会在当前场景上打开编辑器。也可以直接访问 `/editor.html` 从空白画布开始。需要运行导入服务 `python tools/sat_server.py`。
-- **画路。** 沿中心线点几下，双击或按回车结束。每条路可以设每方向车道数（1 到 4 条）、单行和高架。单行路按画的方向行驶。端点靠近已有道路时会自动吸附，接上就是一个路口。按住 Shift 可以取 45° 整数倍方向。
-- **画楼和区域。** 点出轮廓，双击闭合。楼有商铺、写字楼、住宅、场馆四种，可以填层数。区域有绿化带、公园、水体、广场、停车场。
-- **店门和出入口。** 店门会自动贴到最近的外墙。不标的话，生成时会自动布。
-- **修改。** 选择工具可以点选元素改属性、拖顶点改形状，Delete 删除，Ctrl+Z 撤销。改动会自动存在本机。
-- **底图。** 可以选一张本地卫星图或截图铺满画布，对着描。在导入场景上打开时，会带上原来的卫星图和经纬度。
-- **生成。** 编辑器把矢量图交给 `tools/drawscene.py`，画成和手工标记一样的标记图，再交给 map2scene。路口、斑马线、红绿灯、人行道、行道树都自动生成。车道数和单行方向通过 sidecar 传给 map2scene，前端按指定的车道数排车道。
-- **命名。** 编辑器生成的场景存成 `imported/<场景名>`，旁边另存一份矢量图，下次打开和上次画的一模一样。在别的场景上改时，场景名默认加 `-edit`，不会覆盖原场景。
+- **打开方式。** 在三维页的调试条点「编辑场景」，或者访问 `/editor/`。需要运行导入服务 `python tools/sat_server.py`。
 
 ## 实地标注：商户门口和临街范围
 
@@ -225,8 +218,7 @@ python tools/map2scene.py 标记图.png -o public/scenes/my.json --width-m 600 -
 | `tools/autoscene.py` / `sat_server.py` | 全自动流水线 / 前端导入用的本地服务 |
 | `survey.html` / `src/survey/` | 实地标注工具（手机网页）；`model.js` 是网格、坐标换算、吸附、导出的纯函数 |
 | `tools/survey.py` | 实地标注数据的合并与写回场景 |
-| `editor.html` / `src/editor/` | 场景编辑器；`model.js` 是场景拆成矢量图、命中测试、吸附、检查的纯函数 |
-| `tools/drawscene.py` | 编辑器矢量图 → 标记图 + sidecar → map2scene |
+| `editor/` | 场景编辑器：页面、前端代码、后端 `drawscene.py`、测试和设计说明，见 `editor/README.md` |
 | `tools/roofnet.py` | 屋顶（+ 道路）分割网络：训练、分块推理、分水岭拆单栋 |
 | `tools/osm.py` | OpenStreetMap: 地理参考、GCJ-02、Overpass、路网自动对齐 |
 | `tools/fetch_samples.py` / `eval_buildings.py` | 下载 SpaceNet 样例 / 训练数据；自动建筑的评测 |

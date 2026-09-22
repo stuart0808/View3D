@@ -35,6 +35,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoscene  # noqa: E402
 import survey as sv_survey  # noqa: E402
+
+sys.path.insert(0, str(HERE.parent / "editor" / "backend"))  # 场景编辑器的后端在 editor/backend/
 import drawscene  # noqa: E402
 
 OUT = HERE.parent / "public" / "scenes" / "imported"  # vite 直接把 public/ 当静态目录，前端用 /scenes/imported/<name>.json 取
