@@ -35,6 +35,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 WEIGHTS = HERE / "roofnet.pt"
 TRAIN_DIR = HERE / "samples" / "train"
+ROAD_DIR = HERE / "samples" / "train_roads"  # SpaceNet 3 道路瓦片（fetch_samples.py --train-roads）
 NET_MPP = 0.3  # 网络训练时的分辨率（米/像素）
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)  # ImageNet 的均值 / 方差（RGB 顺序），预训练编码器要这个归一化
 STD = np.array([0.229, 0.224, 0.225], np.float32)
@@ -43,7 +44,7 @@ STD = np.array([0.229, 0.224, 0.225], np.float32)
 # ----------------------------------------------------------------------------
 # 模型
 # ----------------------------------------------------------------------------
-def build_model(pretrained=True):
+def build_model(pretrained=True, n_out=2):
     """ResNet18 编码器 + U-Net 解码器。torch 在函数里 import: 只用推理结果的模块（比如测试）不必装 torch
 
     Args:
@@ -88,7 +89,7 @@ def build_model(pretrained=True):
             self.u3 = Up(256, 128, 128)  # 1/16 → 1/8，拼 l2
             self.u2 = Up(128, 64, 64)  # 1/8 → 1/4，拼 l1
             self.u1 = Up(64, 64, 32)  # 1/4 → 1/2，拼 stem
-            self.head = nn.Conv2d(32, 2, 1)  # 通道 0 = 建筑，1 = 边界（都是 logit）
+            self.head = nn.Conv2d(32, n_out, 1)  # 通道 0 = 建筑，1 = 边界，2 = 道路（第二版才有）；都是 logit
 
         def forward(self, x):
             """(N,3,H,W) → (N,2,H,W) logit；sigmoid 在外面做（训练用 *_with_logits 损失，数值更稳）"""
@@ -170,7 +171,7 @@ def augment(img, mask, rng, size):
     return img, np.ascontiguousarray(mask)
 
 
-def train(iters=4000, batch=8, size=256, lr=5e-4, threads=None, log_every=50):
+def train(iters=4000, batch=8, size=256, lr=5e-4, threads=None, log_every=50, roads=False, init=None, p_road=0.35):
     """
     训练并保存 tools/roofnet.pt。损失: 建筑通道 BCE + Dice（前景占比小，Dice 防止全判背景），
     边界通道 BCE（正样本权重 5: 边界像素很少）。AdamW + 余弦退火，前 200 步线性预热。
@@ -184,6 +185,12 @@ def train(iters=4000, batch=8, size=256, lr=5e-4, threads=None, log_every=50):
         log_every: 每多少步打一次平均损失和剩余时间
 
     每 500 步和最后一步各存一次权重，中途断掉也有能用的 roofnet.pt。
+
+    第二版（roads=True）: 多一个「道路」输出通道，训练数据混着两种瓦片 ——
+        建筑瓦片（SpaceNet 2）: 只监督 建筑 / 边界 通道（这批瓦片上的路没有标注）
+        道路瓦片（SpaceNet 3）: 只监督 道路 通道（上面的楼没有标注）
+    每张样本带一个「哪些通道有标注」的掩码，损失只在有标注的地方算。init 给第一版权重时，编码器、解码器
+    和前两个输出通道原样继承，只有道路通道从零学 —— 比从头训省一半以上时间。
     """
     import torch
     import torch.nn.functional as F
@@ -196,7 +203,22 @@ def train(iters=4000, batch=8, size=256, lr=5e-4, threads=None, log_every=50):
     if not files:
         raise SystemExit("没有训练数据: 先运行 python tools/fetch_samples.py --train 350")
     print(f"[roofnet] {len(files)} 张训练瓦片，设备 {dev}", file=sys.stderr)
-    model = build_model(True).to(dev)
+    n_out = 3 if roads else 2
+    road_files = sorted(ROAD_DIR.glob("*.jpg")) if roads else []
+    if roads and not road_files:
+        raise SystemExit("没有道路训练数据: 先运行 python tools/fetch_samples.py --train-roads 100")
+    model = build_model(init is None, n_out).to(dev)  # 有初始权重就不必再下载 ImageNet 预训练
+    if init:  # 从第一版继承: 形状一致的参数直接拷，输出层只拷前两个通道
+        ck = torch.load(init, map_location="cpu", weights_only=False)["state_dict"]
+        own = model.state_dict()
+        for k, v in ck.items():
+            v = v.float()
+            if k in own and own[k].shape == v.shape:
+                own[k] = v
+            elif k.startswith("head.") and k in own:
+                own[k][: v.shape[0]] = v  # head.weight (n_out,32,1,1) / head.bias (n_out,)
+        model.load_state_dict(own)
+        print(f"[roofnet] 从 {init} 继承权重，输出 {n_out} 个通道", file=sys.stderr)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     # 学习率倍数 = 预热（前 200 步从 0 线性升到 1）× 余弦（从 1 降到 0）；预热防止刚开始大梯度冲坏预训练编码器
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: min(1.0, (i + 1) / 200) * 0.5 * (1 + math.cos(math.pi * i / iters)))
@@ -207,23 +229,43 @@ def train(iters=4000, batch=8, size=256, lr=5e-4, threads=None, log_every=50):
     model.train()
     for it in range(iters):
         # 组 batch: 每张随机抽一张瓦片现读现增广（数据集小，读盘不是瓶颈，也省内存）
-        xs, ys = [], []
+        xs, ys, vs = [], [], []  # 图 / 标签 / 每个通道有没有标注
         for _ in range(batch):
-            f = rng.choice(files)
+            is_road = roads and rng.random() < p_road
+            f = rng.choice(road_files if is_road else files)
             img = cv2.imdecode(np.fromfile(str(f), np.uint8), cv2.IMREAD_COLOR)
-            m = cv2.imdecode(np.fromfile(str(f).replace(".jpg", "_mask.png"), np.uint8), cv2.IMREAD_GRAYSCALE)
+            suffix = "_road.png" if is_road else "_mask.png"
+            m = cv2.imdecode(np.fromfile(str(f).replace(".jpg", suffix), np.uint8), cv2.IMREAD_GRAYSCALE)
             img, m = augment(img, m, rng, size)
             xs.append(to_tensor(img))
-            ys.append(torch.from_numpy(np.stack([m >= 1, m == 2]).astype(np.float32)))  # 建筑（含边界）/ 边界
-        x, y = torch.stack(xs).to(dev), torch.stack(ys).to(dev)  # x (B,3,S,S)，y (B,2,S,S)
-        out = model(x)  # (B,2,S,S) logit
-        pb = torch.sigmoid(out[:, 0])
-        # 建筑: BCE 管逐像素对错，Dice 管整体重叠（整个 batch 算一个 Dice，+1 平滑防止全背景时 0/0）
-        bce = F.binary_cross_entropy_with_logits(out[:, 0], y[:, 0])
-        dice = 1 - (2 * (pb * y[:, 0]).sum() + 1) / (pb.sum() + y[:, 0].sum() + 1)
-        edge = F.binary_cross_entropy_with_logits(out[:, 1], y[:, 1], pos_weight=pos_w)
-        # 边界是辅助任务，权重 0.5: 让它学出缝，但别压过主任务
-        loss = bce + dice + 0.5 * edge
+            zero = np.zeros_like(m, bool)
+            if is_road:  # 道路瓦片: 只有第 3 个通道有标注
+                ys.append(torch.from_numpy(np.stack([zero, zero, m >= 1]).astype(np.float32)))
+                vs.append([0.0, 0.0, 1.0])
+            else:  # 建筑瓦片: 建筑（含边界）/ 边界 [/ 道路没有标注]
+                ch = [m >= 1, m == 2] + ([zero] if roads else [])
+                ys.append(torch.from_numpy(np.stack(ch).astype(np.float32)))
+                vs.append([1.0, 1.0, 0.0][:n_out])
+        x, y = torch.stack(xs).to(dev), torch.stack(ys).to(dev)  # x (B,3,S,S)，y (B,n_out,S,S)
+        v = torch.tensor(vs, device=dev)  # (B,n_out) 每张样本的每个通道要不要算损失
+        out = model(x)  # (B,n_out,S,S) logit
+
+        def masked(c, pos_weight=None, with_dice=True):
+            """第 c 个通道的 BCE（+ Dice），只算这个通道有标注的样本；这批里一张都没有就是 0"""
+            w = v[:, c]
+            if w.sum() == 0:
+                return out.sum() * 0.0  # 保持计算图，backward 不报错
+            per = F.binary_cross_entropy_with_logits(out[:, c], y[:, c], pos_weight=pos_weight, reduction="none").mean((1, 2))
+            l = (per * w).sum() / w.sum()
+            if with_dice:  # 整批一个 Dice（只算有标注的样本），+1 平滑防止全背景时 0/0
+                pr, gt = torch.sigmoid(out[:, c]) * w[:, None, None], y[:, c] * w[:, None, None]
+                l = l + 1 - (2 * (pr * gt).sum() + 1) / (pr.sum() + gt.sum() + 1)
+            return l
+
+        # 建筑: BCE 管逐像素对错，Dice 管整体重叠；边界是辅助任务，权重 0.5: 让它学出缝，但别压过主任务
+        loss = masked(0) + 0.5 * masked(1, pos_weight=pos_w, with_dice=False)
+        if roads:
+            loss = loss + masked(2)  # 道路: 同样 BCE + Dice（路面也只占小部分）
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -245,7 +287,8 @@ def save(model):
     """
     import torch
     sd = {k: v.half() if v.dtype == torch.float32 else v for k, v in model.state_dict().items()}
-    torch.save({"state_dict": sd, "mpp": NET_MPP, "arch": "resnet18-unet-2ch"}, WEIGHTS)
+    n = model.head.out_channels
+    torch.save({"state_dict": sd, "mpp": NET_MPP, "arch": f"resnet18-unet-{n}ch", "n_out": n}, WEIGHTS)
 
 
 # ----------------------------------------------------------------------------
@@ -284,7 +327,7 @@ def load(path=WEIGHTS, device=None):
     if key not in _model_cache:
         # 先加载到 CPU 再搬: 训练机和推理机设备不同也能读；weights_only=False 因为里面有 mpp / arch 等非张量字段
         ck = torch.load(path, map_location="cpu", weights_only=False)
-        m = build_model(pretrained=False)
+        m = build_model(pretrained=False, n_out=ck.get("n_out", 2))  # 第一版权重没有 n_out 字段，是 2 通道
         m.load_state_dict({k: v.float() for k, v in ck["state_dict"].items()})
         dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         _model_cache[key] = (m.to(dev).eval(), dev)
@@ -313,7 +356,7 @@ def predict(img, mpp, path=WEIGHTS, tile=512, overlap=64, progress=None):
     # 至少 32 像素（网络下采样 32 倍，再小就没特征了）
     im = cv2.resize(img, (max(32, int(round(w0 * s))), max(32, int(round(h0 * s)))), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
     H, W = im.shape[:2]
-    prob = np.zeros((2, H, W), np.float32)  # (2,H,W) 网络分辨率下的拼接结果
+    prob = np.zeros((model.head.out_channels, H, W), np.float32)  # (2,H,W) 网络分辨率下的拼接结果
     # 块起点间隔 = tile − 2·overlap，每块有效的中间部分正好首尾相接；
     # 最后一块会被下面的 min(y, H − tile) 推回图内，和前一块多重叠一些，无妨
     step = tile - 2 * overlap
@@ -397,18 +440,21 @@ def main():
     t.add_argument("--batch", type=int, default=8)
     t.add_argument("--size", type=int, default=256)
     t.add_argument("--threads", type=int, default=None, help="CPU 线程数（留几个给别的程序）")
+    t.add_argument("--roads", action="store_true", help="第二版: 加道路通道（需要 fetch_samples.py --train-roads 的数据）")
+    t.add_argument("--init", default=None, help="从已有权重继续（比如第一版的 tools/roofnet.pt）")
+    t.add_argument("--lr", type=float, default=5e-4)
     p = sub.add_parser("predict")
     p.add_argument("image")
     p.add_argument("--mpp", type=float, required=True)
     p.add_argument("-o", "--out", default=None)
     a = ap.parse_args()
     if a.cmd == "train":
-        return train(a.iters, a.batch, a.size, threads=a.threads)
+        return train(a.iters, a.batch, a.size, a.lr, threads=a.threads, roads=a.roads, init=a.init)
     # np.fromfile + imdecode 而不是 cv2.imread: Windows 上 imread 读不了中文路径
     img = cv2.imdecode(np.fromfile(a.image, np.uint8), cv2.IMREAD_COLOR)
     t0 = time.time()
-    pb, pe = predict(img, a.mpp)
-    inst = instances(pb, pe, a.mpp)
+    probs = predict(img, a.mpp)  # 建筑 / 边界 [/ 道路]
+    inst = instances(probs[0], probs[1], a.mpp)
     print(json.dumps({"buildings": len(inst), "seconds": round(time.time() - t0, 1)}))
     vis = img.copy()
     for x0, y0, s in inst:

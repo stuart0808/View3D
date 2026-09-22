@@ -133,13 +133,14 @@ def detect_buildings(img, mpp, method="auto", progress=None):
         progress: 可选回调 progress(已完成, 总数)
 
     Returns:
-        (crops, used): crops = [(x0, y0, bool 掩码)]，每栋楼一个；used = 实际用的方法名，写进摘要
+        (crops, used, road_prob): crops = [(x0, y0, bool 掩码)]，每栋楼一个；used = 实际用的方法名，写进摘要；
+        road_prob = 道路概率图（float32 (H,W)），只有第二版屋顶网络（带道路通道）才有，否则 None
     """
     import roofnet  # 这里才 import: roofnet 模块本身不依赖 torch，available() 里再探测
     # 首选 roofnet: 专门训练的屋顶分割 + 分水岭拆楼，村镇密集民房上比 SAM 好得多
     if method in ("auto", "roofnet") and roofnet.available():
-        pb, pe = roofnet.predict(img, mpp, progress=progress)
-        return roofnet.instances(pb, pe, mpp), "roofnet"
+        probs = roofnet.predict(img, mpp, progress=progress)  # [建筑, 边界] 或 [建筑, 边界, 道路]
+        return roofnet.instances(probs[0], probs[1], mpp), "roofnet", (probs[2] if len(probs) > 2 else None)
     # 其次 SAM: 作为 find_buildings 的「分割一切」后端；seg 留 None 时 find_buildings 只用颜色连通块
     seg = None
     if method in ("auto", "sam"):
@@ -155,7 +156,32 @@ def detect_buildings(img, mpp, method="auto", progress=None):
             seg = None  # 没装 SAM: 颜色连通块兜底
     # find_buildings 返回候选 dict（含评分等），这里只要裁剪块
     found = sg.find_buildings(img, mpp, seg, progress=progress)
-    return [c["crop"] for c in found], "sam" if seg else "color"
+    return [c["crop"] for c in found], "sam" if seg else "color", None
+
+
+def clean_roads(prob, mpp, thr=0.5, min_len_m=40.0, min_area_m2=150.0):
+    """
+    网络给的道路概率图 → 干净的路面掩膜: 二值化 → 闭运算连上被车 / 树冠遮断的缺口（约 3m）→
+    开运算去掉毛刺 → 丢掉又短又小的碎块（停车场里的通道、院子里的水泥地）。
+
+    Args:
+        prob: 道路概率 float32 (H,W)，0~1
+        mpp: 米/像素（形态学核、长度 / 面积门槛都按米换算）
+        thr: 概率阈值
+        min_len_m / min_area_m2: 连通块外接框长边、面积的下限
+
+    Returns: bool 掩膜
+    """
+    m = (prob > thr).astype(np.uint8)
+    k = max(3, int(round(3.0 / mpp)) | 1)  # 核 ≈ 3m，奇数
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    keep = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, w, h, area = st[i]
+        keep[i] = max(w, h) * mpp >= min_len_m and area * mpp * mpp >= min_area_m2  # 够长也够大才算路
+    return keep[lab]
 
 
 def poly_px(pts):
@@ -167,7 +193,7 @@ def poly_px(pts):
     return np.round(np.asarray(pts)).astype(np.int32).reshape(-1, 1, 2)
 
 
-def build_labels(img, mpp, bld_crops, feats=None):
+def build_labels(img, mpp, bld_crops, feats=None, img_roads=None):
     """
     拼类别图（和 sat2marks 的 labels 一样的编码）。画的顺序决定谁盖谁:
         植被（图像）→ OSM 绿地 / 公园 / 停车场 / 广场 → 水 → 道路 / 高架 → 建筑
@@ -179,6 +205,8 @@ def build_labels(img, mpp, bld_crops, feats=None):
         mpp: 米/像素
         bld_crops: detect_buildings 的裁剪块 [(x0, y0, bool 掩码)]
         feats: osm.features 的结果（已对齐到图像像素坐标），None = 没有 OSM
+        img_roads: 网络识别的路面 bool 掩膜（第二版屋顶网络才有），None = 没有；
+                   只在 OSM 路网不到 3 条时使用（OSM 的拓扑和路宽更可靠）
 
     labels 是 uint8 (H,W)，每像素一个 CLASSES 里的类别 id，0 = 空地；
     楼列表里 crop = (x0, y0, 掩码)，cls = 建筑类别 id，floors = 层数。
@@ -220,6 +248,12 @@ def build_labels(img, mpp, bld_crops, feats=None):
             cls = {"shop": CID["shop2"], "block": CID["block"], "residential": CID["residential"]}[kind]
             lab[m > 0] = cls
             blds.append({"crop": sg.crop(m > 0), "cls": cls, "floors": b["floors"] or default_floors(area, kind)})  # 层数: OSM 的 building:levels 优先
+    # 图像识别的路（第二版屋顶网络才有）: OSM 没给出像样的路网（没坐标 / 那片 OSM 没画）时才用，
+    # 画在植被之上、建筑之下；也记进 road，后面图像识别的楼压在上面的部分会被抠掉
+    osm_has_roads = bool(feats and len(feats["roads"]) >= 3)
+    if img_roads is not None and not osm_has_roads:
+        lab[img_roads] = CID["road"]
+        road |= img_roads.astype(np.uint8)
     # 图像识别的楼: 去重 → 抠路 → 去碎块，剩下的补进标签图
     for c in bld_crops:
         x0, y0, sub = c
@@ -278,8 +312,9 @@ def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progre
 
     # ---- 2. 建筑检测（最耗时，占进度 5%~55%）----
     say("识别建筑", 0.05)
-    crops, used =detect_buildings(img, mpp, method, progress=lambda a, b: say("识别建筑", 0.05 + 0.5 * a / max(1, b)))
-    summary.update(method=used, detected=len(crops))
+    crops, used, road_prob = detect_buildings(img, mpp, method, progress=lambda a, b: say("识别建筑", 0.05 + 0.5 * a / max(1, b)))
+    img_roads = clean_roads(road_prob, mpp) if road_prob is not None else None  # 网络识别的路面（第二版才有）
+    summary.update(method=used, detected=len(crops), image_roads=img_roads is not None)
 
     # ---- 3. OSM（只有知道经纬度时才取）----
     feats = None
@@ -298,7 +333,7 @@ def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progre
 
     # ---- 4. 类别图 → 彩色标记图 + 层数 sidecar（map2scene 的输入格式，和手工 sat2marks 导出的一样）----
     say("拼标注", 0.7)
-    lab, blds = build_labels(img, mpp, crops, feats)
+    lab, blds = build_labels(img, mpp, crops, feats, img_roads)
     # 类别 id → BGRA 颜色查找表；map2scene 按颜色认类别，所以颜色必须和 CLASSES 完全一致（不能有抗锯齿）
     lut = np.zeros((256, 4), np.uint8)
     for c in CLASSES:

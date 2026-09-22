@@ -186,7 +186,8 @@ def main():
         if args.method == "roofnet":  # 网络推理（不缓存，几秒钟）
             import roofnet
             t0 = time.time()
-            pred = roofnet.instances(*roofnet.predict(img, mpp), mpp)
+            probs = roofnet.predict(img, mpp)  # 第二版多一个道路通道，这里只用前两个
+            pred = roofnet.instances(probs[0], probs[1], mpp)
             t_sam, t_pick = time.time() - t0, 0.0  # 网络一步到位，整段时间记在「SAM」列里
         else:
             # SAM 路线分两步: 原始掩膜（慢、可缓存）→ 筛选（快，调规则时只重跑这步）

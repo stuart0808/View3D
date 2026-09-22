@@ -177,3 +177,58 @@ def test_tile_origin_parses_geotiff_header(monkeypatch):
     data = buf.getvalue()
     monkeypatch.setattr(fs, "http", lambda url, rng=None, **k: data[rng[0]:rng[1] + 1] if rng else data)
     assert fs.tile_origin("x") == pytest.approx((121.5, 31.25, 2.7e-6, 2.7e-6))
+
+
+def test_clean_roads_keeps_long_strips_only():
+    prob = np.zeros((200, 300), np.float32)
+    prob[95:105, :] = 0.9  # 一条 300 像素长的路
+    prob[95:105, 140:143] = 0.1  # 被一辆车遮断 3 像素
+    prob[20:30, 20:40] = 0.9  # 院子里的一小块水泥地
+    m = autoscene.clean_roads(prob, 0.5)
+    assert m[100, :].all()  # 缺口被连上
+    assert not m[25, 30]  # 小块丢掉
+
+
+def test_build_labels_uses_image_roads_only_without_osm():
+    img = np.full((200, 200, 3), 150, np.uint8)
+    roads = np.zeros((200, 200), bool)
+    roads[95:105, :] = True
+    crop = sg.crop(_rect(120, 80, 150, 125))
+    lab, _ = autoscene.build_labels(img, 0.5, [crop], None, roads)
+    assert lab[100, 10] == CID["road"] and lab[100, 130] == CID["road"]  # 路面盖掉楼的像素
+    assert lab[90, 130] == CID["residential"]
+    feats = {k: [] for k in ("roads", "water", "green", "park", "parking", "plaza", "buildings", "waterways")}
+    feats["roads"] = [dict(pts=np.array([[0.0, 30.0 + 40 * i], [200.0, 30.0 + 40 * i]]), cls="residential", width_m=4, oneway=False, elevated=False) for i in range(3)]
+    lab2, _ = autoscene.build_labels(img, 0.5, [], feats, roads)
+    assert lab2[100, 10] != CID["road"]  # OSM 有路网时不用图像识别的路
+
+
+def test_three_channel_training_inherits_two_channel_weights(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    bdir, rdir = tmp_path / "b", tmp_path / "r"
+    bdir.mkdir(); rdir.mkdir()
+    rng = np.random.default_rng(0)
+    for i in range(2):  # 两张建筑瓦片、两张道路瓦片（随机图 + 简单掩膜）
+        im = rng.integers(0, 255, (96, 96, 3), np.uint8)
+        m = np.zeros((96, 96), np.uint8); m[20:60, 20:60] = 1; m[20, 20:60] = 2
+        cv2.imencode(".jpg", im)[1].tofile(str(bdir / f"b{i}.jpg")); cv2.imencode(".png", m)[1].tofile(str(bdir / f"b{i}_mask.png"))
+        r = np.zeros((96, 96), np.uint8); r[40:50, :] = 1
+        cv2.imencode(".jpg", im)[1].tofile(str(rdir / f"r{i}.jpg")); cv2.imencode(".png", r)[1].tofile(str(rdir / f"r{i}_road.png"))
+    monkeypatch.setattr(roofnet, "TRAIN_DIR", bdir)
+    monkeypatch.setattr(roofnet, "ROAD_DIR", rdir)
+    w2 = tmp_path / "w2.pt"
+    monkeypatch.setattr(roofnet, "WEIGHTS", w2)
+    m2 = roofnet.build_model(pretrained=False, n_out=2)
+    roofnet.save(m2)  # 第一版（2 通道）权重
+    w3 = tmp_path / "w3.pt"
+    monkeypatch.setattr(roofnet, "WEIGHTS", w3)
+    roofnet.train(iters=2, batch=2, size=64, roads=True, init=str(w2), log_every=1)
+    ck = torch.load(w3, weights_only=False)
+    assert ck["n_out"] == 3 and ck["state_dict"]["head.weight"].shape[0] == 3
+    # 前两个输出通道和编码器继承自 2 通道权重（训练了 2 步，不会差太多）
+    old = torch.load(w2, weights_only=False)["state_dict"]
+    assert torch.allclose(ck["state_dict"]["head.weight"][:2].float(), old["head.weight"].float(), atol=0.05)
+    roofnet._model_cache.clear()
+    probs = roofnet.predict(np.zeros((70, 90, 3), np.uint8), 0.3, path=w3)
+    assert len(probs) == 3 and probs[2].shape == (70, 90)
+    roofnet._model_cache.clear()
