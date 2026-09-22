@@ -14,6 +14,7 @@ import { Traffic } from './traffic.js'
 import { Signals } from './signals.js'
 import { CURB_H } from './ground.js'
 import { buildTrees } from './props.js'
+import { planLamps, buildLamps } from './lamps.js'
 import { makeRandom } from './geometry.js'
 
 export const DEFAULT_STYLE = {
@@ -137,6 +138,8 @@ export class CityEngine {
     world.add(this.crowd.mesh)
 
     if (this.options.trees !== false) world.add(buildTrees(sceneData, this.nav, rand))
+    // 路灯: 布点是纯函数，渲染是几个实例化网格；夜里由 #applyEnvironment 点亮
+    if (this.options.lamps !== false) { this.lamps = buildLamps(planLamps(sceneData, this.nav, rand)); world.add(this.lamps.group) }
     if (this.traffic) {
       this.traffic.crowd = this.crowd
       world.add(this.traffic.mesh, this.traffic.decor)
@@ -168,6 +171,8 @@ export class CityEngine {
     this.heat?.dispose()
     this.crowd?.dispose()
     this.traffic?.dispose()
+    this.lamps?.dispose()
+    this.lamps = null
     this.transit?.dispose()
     this.transit = null
     this.world = this.heat = this.crowd = this.nav = this.traffic = this.signals = null
@@ -366,6 +371,7 @@ export class CityEngine {
     this.sun.intensity = 0.15 + 1.95 * dl
     this.sun.color.set('#fff6ea').lerp(new THREE.Color('#ffb070'), THREE.MathUtils.clamp((0.45 - dl) / 0.35, 0, 1)) // 清晨黄昏偏暖
     this.hemi.intensity = 0.3 + 0.85 * dl
+    this.lamps?.setNight(1 - dl) // 黄昏开灯，深夜最亮
     const sky = new THREE.Color('#1b2333').lerp(new THREE.Color(this.style.background), dl)
     this.renderer.setClearColor(sky)
     this.backdrop?.material.color.setScalar(0.13 + 0.87 * dl) // 背景楼块的颜色是烘焙的，整体压暗
