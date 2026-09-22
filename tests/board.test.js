@@ -235,6 +235,14 @@ describe('编号延续', () => {
   })
 })
 
+describe('记录比较', () => {
+  it('键的先后不影响，嵌套对象也排序；undefined 当 null', () => {
+    expect(B.canon({ b: 1, a: { d: [1, { y: 2, x: 1 }], c: 'x' } })).toBe(B.canon({ a: { c: 'x', d: [1, { x: 1, y: 2 }] }, b: 1 }))
+    expect(B.canon({ a: 1 })).not.toBe(B.canon({ a: 2 }))
+    expect(B.canon({ a: undefined })).toBe('{"a":null}')
+  })
+})
+
 describe('自动配色', () => {
   it('挑周围没有的颜色，从上一次的下一个开始轮；全用过时挑最少的', () => {
     const b = draw(['12', '3.'])

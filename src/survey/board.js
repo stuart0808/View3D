@@ -331,7 +331,7 @@ export function doorGeom(b, d) {
 // ---------------------------------------------------------------------------
 
 /** 键排好序的 JSON（比较两份记录内容是否相同，不受键的先后影响） */
-function canon(v) {
+export function canon(v) {
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']' // 数组按顺序
   if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' // 对象按键名排序
   return JSON.stringify(v ?? null) // 基本类型；undefined 当 null
