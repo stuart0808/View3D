@@ -59,6 +59,14 @@
 - `tools/osm.py`: 经纬度网格 / Web 墨卡托截图两种地理参考、GCJ-02 换算、Overpass（缓存 + 备用服务器）、
   道路等级 → 路宽、长桥快速路当高架、路网与影像自动对齐
 
+### 实地标注工具（手机网页 `survey.html`）
+- 50 米网格分工，每格可标未查 / 进行中 / 已完成 / 待复核
+- 点楼新增商户，点外墙标门口（自动吸附、算朝外方向，可标多扇），墙上点两下取临街范围，填店名、业态、楼层、营业时间
+- 带经纬度的场景可以用手机定位；高德 / 腾讯截图自动做 GCJ-02 换算
+- 修改先存手机，同步时由导入服务合并（按修改时间取新，删除留墓碑）；导出 GeoJSON / CSV
+- 写回仿真: 生成 `-surveyed` 场景，实测的门替换自动生成的门，吸引力按业态汇总
+- 三维页调试条加「实地标注」入口
+
 ### 屋顶分割网络 `tools/roofnet.py`
 - ResNet18-UNet，建筑 + 边界两个通道，边界用来把挨着的房子拆开；在 SpaceNet 上海 / 拉斯维加斯 / 巴黎 / 喀土穆 1400 张瓦片上训练，
   增广模拟网络地图截图（缩放、颜色、模糊、JPEG）
@@ -81,7 +89,7 @@
 - 样例数据: `tools/fetch_samples.py` 下载 SpaceNet（CC BY-SA 4.0）场景并拼接，正方形像素（经纬度网格东西向要 ×cos 纬度）
 
 ### 测试
-- pytest 89 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
+- pytest 96 例、vitest 164 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
 
 ## v0.2.0 — 2026-09-22　城区版
 

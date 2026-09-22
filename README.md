@@ -94,6 +94,24 @@ python tools/eval_buildings.py --method roofnet   # 在评测场景上打分
 数据来源：卫星样例和训练数据来自 [SpaceNet](https://spacenet.ai/)（Maxar / WorldView-3，CC BY-SA 4.0）；
 道路等矢量数据来自 © OpenStreetMap contributors（ODbL）。都只下载到本机 `tools/samples/`，不进仓库。
 
+## 实地标注：商户门口和临街范围
+
+甲方的考察人员可以用手机，在现场对着卫星图标出每家商户的门口和临街范围。标完能写回仿真，人流就按真实的商户分布走。
+
+- **打开方式。** 在三维页的调试条点「实地标注」，或者直接访问 `/survey.html?scene=<场景 id>`。需要同时运行导入服务 `python tools/sat_server.py`。
+- **网格分工。** 场景切成 50 米见方的格子，编号为 A01、B07 这样。拖动地图让屏幕中心的十字对准某一格，就能把它标成未查、进行中、已完成或待复核。
+- **标商户。** 点一栋楼，再点「新增商户」，然后点外墙标门口。门口会自动贴到墙上并算出朝外方向，一家店可以标多扇门。「临街范围」是在外墙上点两下，沿墙取较短的一段。店名、业态、楼层、营业时间和备注在表单里填。
+- **定位。** 只有带经纬度导入的场景能用，也就是网络地图截图或 GeoTIFF。手机浏览器只在 https 下允许定位。
+- **存储与同步。** 每次改动先存在手机上，没网也不会丢。点「同步」后，导入服务会把几台手机的数据合并，同一家店以后改的为准，删除也能同步。数据存在 `data/survey/`，这个目录不进仓库。
+- **导出。** 可以导出 GeoJSON 和 CSV。场景有经纬度时坐标是 WGS84，否则是场景米。CSV 能直接用 Excel 打开。
+- **写回仿真。** 服务器会另存一个 `imported/<名字>-surveyed` 场景，原场景不动。标过门的楼会换成实测的门，吸引力按业态汇总。
+
+手机和电脑在同一个局域网时，用下面的命令让手机也能访问：
+
+```bash
+npm run dev -- --host
+```
+
 ## 从卫星图出场景：sat2marks
 
 ```bash
@@ -192,6 +210,8 @@ python tools/map2scene.py 标记图.png -o public/scenes/my.json --width-m 600 -
 | `src/city/stations.js` | 地铁出入口亭 / 高铁站房 / 综合枢纽的模型与站前广场选边 |
 | `src/city/lamps.js` | 路灯布点（干道 / 街道 / 高架 / 庭院四种）与夜间点亮 |
 | `tools/autoscene.py` / `sat_server.py` | 全自动流水线 / 前端导入用的本地服务 |
+| `survey.html` / `src/survey/` | 实地标注工具（手机网页）；`model.js` 是网格、坐标换算、吸附、导出的纯函数 |
+| `tools/survey.py` | 实地标注数据的合并与写回场景 |
 | `tools/roofnet.py` | 屋顶（+ 道路）分割网络：训练、分块推理、分水岭拆单栋 |
 | `tools/osm.py` | OpenStreetMap: 地理参考、GCJ-02、Overpass、路网自动对齐 |
 | `tools/fetch_samples.py` / `eval_buildings.py` | 下载 SpaceNet 样例 / 训练数据；自动建筑的评测 |
