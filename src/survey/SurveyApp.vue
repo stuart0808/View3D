@@ -64,7 +64,7 @@ const infoCache = new Map() // 色块签名 → 派生字段，形状没变的�
 function buildingAtFast(x, y) {
   for (let k = bldBoxes.length - 1; k >= 0; k--) {
     const [b, x0, y0, x1, y1] = bldBoxes[k] // 楼和它的外包框
-    if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && B.inPoly(b.polygon, x, y)) return b
+    if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && B.inPoly(b.polygon, x, y)) return b // 外包框里再做精确判断
   }
   return null
 }
@@ -76,19 +76,19 @@ function buildingAtFast(x, y) {
  */
 function info(comp) {
   const sig = `${comp.color}|${comp.seed}|${comp.count}|${comp.c0},${comp.r0},${comp.c1},${comp.r1}` // 形状签名
-  if (infoCache.has(sig)) return infoCache.get(sig)
+  if (infoCache.has(sig)) return infoCache.get(sig) // 同样的形状算过了
   let b = buildingAtFast(comp.cx, comp.cy) // 先看中心
-  if (!b) {
+  if (!b) { // 中心不在任何楼里
     const votes = new Map(), step = Math.max(1, Math.floor(comp.count / 40)) // 最多抽 40 格投票
     for (let n = 0; n < comp.cells.length; n += step) {
       const k = comp.cells[n], c = k % board.w, r = (k - c) / board.w // 抽到的格子
       const hit = buildingAtFast(board.x0 + c + 0.5, board.y0 + r + 0.5) // 它在哪栋楼里
-      if (hit) votes.set(hit, (votes.get(hit) || 0) + 1)
+      if (hit) votes.set(hit, (votes.get(hit) || 0) + 1) // 这栋楼得一票
     }
     b = [...votes].sort((p, q) => q[1] - p[1])[0]?.[0] || null // 票最多的楼；都不在楼里就是 null（写回时跳过）
   }
-  const out = { building: b?.id || null, cell: M.cellAt(grid.value, comp.cx, comp.cy), center: [Math.round(comp.cx * 10) / 10, Math.round(comp.cy * 10) / 10] }
-  infoCache.set(sig, out)
+  const out = { building: b?.id || null, cell: M.cellAt(grid.value, comp.cx, comp.cy), center: [Math.round(comp.cx * 10) / 10, Math.round(comp.cy * 10) / 10] } // 中心坐标保留 1 位小数
+  infoCache.set(sig, out) // 记进缓存
   return out
 }
 
@@ -102,8 +102,8 @@ function stamp(s, shops, changed) {
   if (!changed.size) return { ...s, shops } // 没变化: 只换列表（顺序可能变了）
   const now = Date.now(), by = surveyor.value // 这一批统一的时间和人
   const old = new Set(s.shops.map((x) => x.id)) // 原来就有的编号，区分新增和修改
-  const next = shops.map((x) => (changed.has(x.id) ? { ...x, by, t: now } : x))
-  const log = [...s.log]
+  const next = shops.map((x) => (changed.has(x.id) ? { ...x, by, t: now } : x)) // 有变化的才换人和时间
+  const log = [...s.log] // 日志追加在后面
   for (const x of next) if (changed.has(x.id)) log.push({ t: now, by, action: x.deleted ? 'delete' : old.has(x.id) ? 'edit' : 'add', id: x.id })
   return { ...s, shops: next, log }
 }
@@ -115,11 +115,11 @@ function stamp(s, shops, changed) {
 function relabel(s, usePrev) {
   const lb = B.label(board) // 新的连通块
   const prev = usePrev && labeled ? { labels: labeled.labels, owner } : null // 上一次的结果
-  const out = B.reconcile(board, lb, s.shops, prev, { newId: () => M.newShopId(), info })
+  const out = B.reconcile(board, lb, s.shops, prev, { newId: () => M.newShopId(), info }) // 对号，新店用时间 + 随机数编号
   labeled = lb // 记下来给下一次对号、点选用
-  owner = out.owner
+  owner = out.owner // 块号 → 编号
   rev.value++ // 通知计算属性
-  return stamp(s, out.shops, out.changed)
+  return stamp(s, out.shops, out.changed) // 有变化的商户记人和时间
 }
 
 const liveBoardShops = computed(() => survey.value.shops.filter((s) => !s.deleted && s.seed)) // 画板上现有的商户
@@ -141,10 +141,10 @@ async function doSync() {
     const j = await r.json() // 服务器合并后的完整数据
     if (!r.ok || j.error) throw new Error(j.error || r.status) // HTTP 错误或服务端校验不过
     // 旧版导入服务不认识 tiles，合并时会把画板丢掉；这时绝不能用它的结果覆盖本机，否则画好的色块全没了
-    if (!j.tiles) {
-      sync.state = 'fail'
+    if (!j.tiles) { // 回来的数据没有画板分块
+      sync.state = 'fail' // 按钮变红
       sync.msg = '导入服务版本太旧（不支持涂色板），请重启 python tools/sat_server.py；数据仍在本机'
-      return
+      return // 本机数据不动
     }
     const tilesChanged = JSON.stringify(j.tiles || {}) !== JSON.stringify(survey.value.tiles || {}) // 别人改过画板没有
     survey.value = j // 用合并结果替换本机的，别人标的也有了
@@ -186,7 +186,7 @@ const centerCell = computed(() => (grid.value ? M.cellAt(grid.value, view.cx, vi
 /** 屏幕像素坐标 → 场景米 */
 function toScene(clientX, clientY) {
   const r = cv.value.getBoundingClientRect() // 画布在页面上的位置
-  return [view.cx + ((clientX - r.left) / r.width - 0.5) * view.w, view.cy + ((clientY - r.top) / r.height - 0.5) * viewH.value]
+  return [view.cx + ((clientX - r.left) / r.width - 0.5) * view.w, view.cy + ((clientY - r.top) / r.height - 0.5) * viewH.value] // 按比例从视口左上角算过去
 }
 
 /** 以屏幕上某点为不动点缩放（k > 1 放大）；最近看 8 米宽（一格一米看得很清楚），最远两倍场景宽 */
@@ -196,15 +196,15 @@ function zoomAt(clientX, clientY, k) {
   const w = Math.min(maxW, Math.max(8, view.w / k)) // 截到上下限
   const f = w / view.w // 实际缩放比
   view.cx = x + (view.cx - x) * f // 不动点公式: 新中心 = 手指 + (旧中心 - 手指) × 缩放比
-  view.cy = y + (view.cy - y) * f
-  view.w = w
+  view.cy = y + (view.cy - y) * f // 纵向同理
+  view.w = w // 新的视口宽度
 }
 
 /** 缩放到整个场景 */
 function fitAll() {
-  if (!board) return
+  if (!board) return // 场景还没读到
   view.cx = board.x0 + board.w / 2 // 视口中心放到画板中心
-  view.cy = board.y0 + board.h / 2
+  view.cy = board.y0 + board.h / 2 // 纵向居中
   view.w = Math.max(board.w, (board.h * size.w) / size.h) * 1.05 // 宽高都装得下，留 5% 边
 }
 
@@ -229,13 +229,13 @@ function buildBase(sc) {
   const rings = (path, poly) => { poly.forEach(([x, y], k) => (k ? path.lineTo(x, y) : path.moveTo(x, y))); path.closePath() } // 一个环
   const polys = (list) => { const p = new Path2D(); for (const it of list || []) { rings(p, it.polygon); for (const h of it.holes || []) rings(p, h) } return p } // 一层多边形
   const areas = {} // 种类 → Path2D
-  for (const a of sc.areas || []) (areas[a.kind] ||= []).push(a)
+  for (const a of sc.areas || []) (areas[a.kind] ||= []).push(a) // 按种类分组
   const lanes = new Map() // 路宽 → 这种宽度的所有路的 Path2D（同宽的路一次描完）
-  for (const l of sc.lanes || []) {
+  for (const l of sc.lanes || []) { // 路按宽度分组
     const w = Math.round(l.width * 2) / 2 // 按半米归并，减少描边次数
-    const p = lanes.get(w) || new Path2D()
-    l.points.forEach(([x, y], k) => (k ? p.lineTo(x, y) : p.moveTo(x, y)))
-    lanes.set(w, p)
+    const p = lanes.get(w) || new Path2D() // 这种宽度的路径
+    l.points.forEach(([x, y], k) => (k ? p.lineTo(x, y) : p.moveTo(x, y))) // 折线逐点连
+    lanes.set(w, p) // 存回去
   }
   return {
     site: polys(sc.site), pavement: polys(sc.pavement), // 场地、人行铺装
@@ -247,77 +247,77 @@ function buildBase(sc) {
 /** 整个涂色层按画板重画（读到场景 / 同步后） */
 function rebuildPaint() {
   paintCv = document.createElement('canvas') // 一格一像素
-  paintCv.width = board.w
-  paintCv.height = board.h
-  const pctx = paintCv.getContext('2d')
+  paintCv.width = board.w // 宽 = 画板列数
+  paintCv.height = board.h // 高 = 画板行数
+  const pctx = paintCv.getContext('2d') // 离屏画布的上下文
   paintImg = pctx.createImageData(board.w, board.h) // 像素缓冲
   paintU32 = new Uint32Array(paintImg.data.buffer) // 按 32 位整块写，比逐通道快
-  for (let k = 0; k < board.data.length; k++) paintU32[k] = RGBA[board.data[k]]
-  pctx.putImageData(paintImg, 0, 0)
-  requestDraw()
+  for (let k = 0; k < board.data.length; k++) paintU32[k] = RGBA[board.data[k]] // 每格填颜色
+  pctx.putImageData(paintImg, 0, 0) // 一次拷进离屏画布
+  requestDraw() // 画到屏幕上
 }
 
 /** 只更新改过的格子（按外包框局部 putImageData） */
 function updatePaint(idx) {
-  if (!idx.length) return
+  if (!idx.length) return // 没有改动
   let c0 = board.w, r0 = board.h, c1 = -1, r1 = -1 // 改动范围
   for (const k of idx) {
     paintU32[k] = RGBA[board.data[k]] // 这格的新颜色
-    const c = k % board.w, r = (k - c) / board.w
-    if (c < c0) c0 = c
+    const c = k % board.w, r = (k - c) / board.w // 下标拆回行列
+    if (c < c0) c0 = c // 扩大外包框
     if (c > c1) c1 = c
     if (r < r0) r0 = r
     if (r > r1) r1 = r
   }
   paintCv.getContext('2d').putImageData(paintImg, 0, 0, c0, r0, c1 - c0 + 1, r1 - r0 + 1) // 只拷这一块
-  requestDraw()
+  requestDraw() // 画到屏幕上
 }
 
 let raf = 0 // 待执行的重画帧
 /** 请求下一帧重画（一帧里多次请求只画一次） */
 function requestDraw() {
-  if (!raf) raf = requestAnimationFrame(draw)
+  if (!raf) raf = requestAnimationFrame(draw) // 同一帧只排一次
 }
 
 /** 画一帧 */
 function draw() {
-  raf = 0
-  if (!ctx) return
+  raf = 0 // 这一帧已经开始画
+  if (!ctx) return // 还没挂载
   const W = size.w, H = size.h, s = scale.value, p = px.value // 画布尺寸、米→像素、像素→米
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0) // 先按屏幕像素清屏
-  ctx.fillStyle = BG
+  ctx.fillStyle = BG // 底色
   ctx.fillRect(0, 0, W, H)
-  if (!board || !base) return
+  if (!board || !base) return // 场景还没读到
   const ox = view.cx - view.w / 2, oy = view.cy - viewH.value / 2 // 视口左上角（米）
   ctx.setTransform(dpr * s, 0, 0, dpr * s, -ox * s * dpr, -oy * s * dpr) // 之后都用米画
   // 底图: 场地 → 铺装 → 区域 → 路面 → 楼
-  ctx.fillStyle = '#f7f7f5'
+  ctx.fillStyle = '#f7f7f5' // 场地: 近白
   ctx.fill(base.site, 'evenodd')
-  ctx.fillStyle = '#e6e8ec'
+  ctx.fillStyle = '#e6e8ec' // 人行铺装: 浅灰
   ctx.fill(base.pavement, 'evenodd')
-  for (const [color, path] of base.areas) { ctx.fillStyle = color; ctx.fill(path, 'evenodd') }
-  ctx.strokeStyle = '#d3d7de'
-  ctx.lineCap = 'round'
+  for (const [color, path] of base.areas) { ctx.fillStyle = color; ctx.fill(path, 'evenodd') } // 绿地 / 水面 / 停车场
+  ctx.strokeStyle = '#d3d7de' // 路面: 灰
+  ctx.lineCap = 'round' // 路端圆头
   ctx.lineJoin = 'round'
-  for (const [w, path] of base.lanes) { ctx.lineWidth = w; ctx.stroke(path) }
-  ctx.fillStyle = '#ffffff'
+  for (const [w, path] of base.lanes) { ctx.lineWidth = w; ctx.stroke(path) } // 路宽就是描边宽（米）
+  ctx.fillStyle = '#ffffff' // 楼: 白底
   ctx.fill(base.buildings, 'evenodd')
-  ctx.strokeStyle = '#94a3b8'
-  ctx.lineWidth = 1.2 * p
+  ctx.strokeStyle = '#94a3b8' // 楼轮廓: 灰蓝细线
+  ctx.lineWidth = 1.2 * p // 1.2 个屏幕像素
   ctx.stroke(base.buildings)
   // 涂色层: 一格一像素放大，关掉平滑
-  ctx.imageSmoothingEnabled = false
+  ctx.imageSmoothingEnabled = false // 放大不插值，格子边缘锐利
   ctx.globalAlpha = 0.85 // 稍透一点，楼的轮廓线还看得见
-  ctx.drawImage(paintCv, board.x0, board.y0, board.w, board.h)
-  ctx.globalAlpha = 1
-  drawGrid(ox, oy, p, s)
-  drawSelection(p)
-  drawDoors(p, s)
-  drawPreview(p)
+  ctx.drawImage(paintCv, board.x0, board.y0, board.w, board.h) // 一格一像素铺到画板位置
+  ctx.globalAlpha = 1 // 恢复不透明
+  drawGrid(ox, oy, p, s) // 网格和考察格
+  drawSelection(p) // 选中商户的轮廓
+  drawDoors(p, s) // 门口
+  drawPreview(p) // 工具预览
   if (me.value) { // 我的位置: 精度圈 + 蓝点
-    ctx.fillStyle = 'rgba(59,130,246,0.15)'
+    ctx.fillStyle = 'rgba(59,130,246,0.15)' // 精度圈
     ctx.beginPath(); ctx.arc(me.value.x, me.value.y, me.value.acc, 0, 7); ctx.fill()
-    ctx.fillStyle = '#2563eb'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 * p
+    ctx.fillStyle = '#2563eb'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 * p // 蓝点白边
     ctx.beginPath(); ctx.arc(me.value.x, me.value.y, 6 * p, 0, 7); ctx.fill(); ctx.stroke()
   }
 }
@@ -329,38 +329,38 @@ function draw() {
 function drawGrid(ox, oy, p, s) {
   const bx0 = board.x0, by0 = board.y0, bx1 = bx0 + board.w, by1 = by0 + board.h // 画板范围
   const vx0 = Math.max(bx0, ox), vy0 = Math.max(by0, oy) // 可见部分
-  const vx1 = Math.min(bx1, ox + view.w), vy1 = Math.min(by1, oy + viewH.value)
+  const vx1 = Math.min(bx1, ox + view.w), vy1 = Math.min(by1, oy + viewH.value) // 可见部分的右下角
   if (vx1 <= vx0 || vy1 <= vy0) return // 画板不在视野里
   const lines = (step, color, width) => { // 画一种间距的线
-    ctx.beginPath()
+    ctx.beginPath() // 一种间距一条路径
     for (let x = bx0 + Math.ceil((vx0 - bx0) / step) * step; x <= vx1; x += step) { ctx.moveTo(x, vy0); ctx.lineTo(x, vy1) }
     for (let y = by0 + Math.ceil((vy0 - by0) / step) * step; y <= vy1; y += step) { ctx.moveTo(vx0, y); ctx.lineTo(vx1, y) }
-    ctx.strokeStyle = color
-    ctx.lineWidth = width
-    ctx.stroke()
+    ctx.strokeStyle = color // 线色
+    ctx.lineWidth = width // 线宽
+    ctx.stroke() // 一次描完
   }
   // 考察格状态底色
-  const g = grid.value
+  const g = grid.value // 50 米考察网格
   for (const c of g.cells) {
     if (c.x1 < vx0 || c.x0 > vx1 || c.y1 < vy0 || c.y0 > vy1) continue // 不在视野里
-    const st = survey.value.cells[c.id]?.status
+    const st = survey.value.cells[c.id]?.status // 这一格的考察状态
     if (CELL_FILL[st]) { ctx.fillStyle = CELL_FILL[st]; ctx.fillRect(c.x0, c.y0, g.size, g.size) }
   }
   if (s >= 6) lines(1, 'rgba(30,41,59,0.13)', p) // 1 米格
   if (s >= 1.2) lines(10, 'rgba(30,41,59,0.25)', p) // 10 米
   lines(B.TILE, 'rgba(15,23,42,0.55)', 1.5 * p) // 50 米考察格
   // 当前格（屏幕中心十字所在）加粗
-  const cur = g.cells.find((c) => c.id === centerCell.value)
+  const cur = g.cells.find((c) => c.id === centerCell.value) // 屏幕中心所在的格
   if (cur) { ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 2.5 * p; ctx.strokeRect(cur.x0, cur.y0, g.size, g.size) }
   // 编号: 白字黑边，写在左上角
   if (B.TILE * s >= 40) { // 格子太小时不写，免得挤成一团
-    ctx.font = `${11 * p}px system-ui, sans-serif`
-    ctx.textBaseline = 'top'
-    ctx.lineWidth = 3 * p
+    ctx.font = `${11 * p}px system-ui, sans-serif` // 11 像素的字
+    ctx.textBaseline = 'top' // 从左上角往下写
+    ctx.lineWidth = 3 * p // 白色描边
     ctx.strokeStyle = 'rgba(255,255,255,0.9)'
     ctx.fillStyle = '#334155'
-    for (const c of g.cells) {
-      if (c.x1 < vx0 || c.x0 > vx1 || c.y1 < vy0 || c.y0 > vy1) continue
+    for (const c of g.cells) { // 每个可见的格子写编号
+      if (c.x1 < vx0 || c.x0 > vx1 || c.y1 < vy0 || c.y0 > vy1) continue // 不在视野里
       ctx.strokeText(c.id, c.x0 + 3 * p, c.y0 + 3 * p)
       ctx.fillText(c.id, c.x0 + 3 * p, c.y0 + 3 * p)
     }
@@ -369,44 +369,44 @@ function drawGrid(ox, oy, p, s) {
 
 /** 选中的商户: 轮廓描一圈白边 + 深色线 */
 function drawSelection(p) {
-  const o = selOutline.value
-  if (!o) return
-  const path = new Path2D()
+  const o = selOutline.value // 选中店的轮廓
+  if (!o) return // 没选中
+  const path = new Path2D() // 外轮廓和洞一起描
   for (const ring of [...o.outer, ...o.holes]) { ring.forEach(([x, y], k) => (k ? path.lineTo(x, y) : path.moveTo(x, y))); path.closePath() }
-  ctx.lineJoin = 'miter'
+  ctx.lineJoin = 'miter' // 直角不削边
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 4 * p; ctx.stroke(path) // 白底
   ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 2 * p; ctx.stroke(path) // 深色线
 }
 
 /** 门: 格点上一个白圆点 + 朝外的箭头；选中店的门是深色。缩得很小时（一米不到 1.5 像素）不画 */
 function drawDoors(p, s) {
-  if (s < 1.5) return
+  if (s < 1.5) return // 缩得太小
   const x0 = view.cx - view.w / 2 - 2, x1 = view.cx + view.w / 2 + 2 // 视野（多留 2 米）
-  const y0 = view.cy - viewH.value / 2 - 2, y1 = view.cy + viewH.value / 2 + 2
+  const y0 = view.cy - viewH.value / 2 - 2, y1 = view.cy + viewH.value / 2 + 2 // 视野上下边
   // 场景自动生成的门（参考）: 小灰点，放大后才画
-  if (s >= 4) {
-    ctx.fillStyle = 'rgba(100,116,139,0.6)'
+  if (s >= 4) { // 放大到一米 4 像素以上
+    ctx.fillStyle = 'rgba(100,116,139,0.6)' // 灰点
     for (const d of scene.value.doors || []) {
-      const [x, y] = d.pos
-      if (x < x0 || x > x1 || y < y0 || y > y1) continue
+      const [x, y] = d.pos // 门的位置
+      if (x < x0 || x > x1 || y < y0 || y > y1) continue // 不在视野里
       ctx.beginPath(); ctx.arc(x, y, 2.5 * p, 0, 7); ctx.fill()
     }
   }
   const L = Math.max(0.9, 13 * p), r = 4.5 * p // 箭头长度（至少 0.9 米）、圆点半径
-  for (const shop of liveBoardShops.value) {
+  for (const shop of liveBoardShops.value) { // 每家店
     const sel = shop.id === selectedId.value // 选中的店
-    for (const d of shop.doors || []) {
+    for (const d of shop.doors || []) { // 每扇门
       const [x, y] = d.pos, [nx, ny] = B.DIRS[d.dir] // 格点位置和朝向
       if (x < x0 || x > x1 || y < y0 || y > y1) continue // 不在视野里
       const ink = sel ? '#0f172a' : '#1e293b' // 箭头颜色
-      ctx.strokeStyle = ink
-      ctx.fillStyle = ink
-      ctx.lineWidth = (sel ? 2.5 : 1.8) * p
+      ctx.strokeStyle = ink // 箭杆颜色
+      ctx.fillStyle = ink // 箭头颜色
+      ctx.lineWidth = (sel ? 2.5 : 1.8) * p // 选中的更粗
       ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + nx * L, y + ny * L); ctx.stroke() // 箭杆
       const hx = x + nx * L, hy = y + ny * L, a = 5 * p // 箭头尖和大小
       ctx.beginPath(); ctx.moveTo(hx + nx * a, hy + ny * a); ctx.lineTo(hx - ny * a, hy + nx * a); ctx.lineTo(hx + ny * a, hy - nx * a); ctx.closePath(); ctx.fill() // 三角形箭头
       ctx.fillStyle = sel ? '#facc15' : '#fff' // 圆点: 选中的店黄色
-      ctx.lineWidth = 1.5 * p
+      ctx.lineWidth = 1.5 * p // 圆点描边
       ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.stroke()
     }
   }
@@ -414,41 +414,41 @@ function drawDoors(p, s) {
 
 /** 工具预览: 矩形框、多边形已点的顶点、鼠标悬停时的笔刷 / 格点 */
 function drawPreview(p) {
-  ctx.lineWidth = 1.5 * p
+  ctx.lineWidth = 1.5 * p // 预览线宽
   ctx.setLineDash([4 * p, 3 * p]) // 虚线表示「还没落下」
   const col = paintValue() ? B.PALETTE[paintValue()] : '#64748b' // 预览用当前颜色（擦除用灰色）
   if (gesture?.rect) { // 矩形划区拖动中
-    const { c0, r0, c1, r1 } = gesture.rect
-    ctx.strokeStyle = '#0f172a'
+    const { c0, r0, c1, r1 } = gesture.rect // 矩形的两个角（格）
+    ctx.strokeStyle = '#0f172a' // 深色边
     ctx.fillStyle = col + '66' // 半透明
     const x = board.x0 + Math.min(c0, c1), y = board.y0 + Math.min(r0, r1) // 左上角
     const w = Math.abs(c1 - c0) + 1, h = Math.abs(r1 - r0) + 1 // 宽高（格）
-    ctx.fillRect(x, y, w, h)
-    ctx.strokeRect(x, y, w, h)
+    ctx.fillRect(x, y, w, h) // 半透明填充
+    ctx.strokeRect(x, y, w, h) // 虚线边框
   }
   if (polyPts.value.length) { // 多边形划区: 已点的顶点连线，末点连到鼠标 / 起点
-    ctx.strokeStyle = '#0f172a'
-    ctx.beginPath()
+    ctx.strokeStyle = '#0f172a' // 深色线
+    ctx.beginPath() // 顶点连线
     polyPts.value.forEach(([x, y], k) => (k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)))
     if (hover.value) ctx.lineTo(...snapVertex(...hover.value))
-    ctx.stroke()
-    ctx.setLineDash([])
-    ctx.fillStyle = '#fff'
+    ctx.stroke() // 描出来
+    ctx.setLineDash([]) // 顶点圆圈用实线
+    ctx.fillStyle = '#fff' // 白底
     for (const [x, y] of polyPts.value) { ctx.beginPath(); ctx.arc(x, y, 4 * p, 0, 7); ctx.fill(); ctx.stroke() }
   }
-  ctx.setLineDash([])
+  ctx.setLineDash([]) // 恢复实线
   if (!hover.value || pointers.size) return // 没有悬停（手机）或者正按着
-  const [hx, hy] = hover.value
-  const t = tool.value
+  const [hx, hy] = hover.value // 悬停位置
+  const t = tool.value // 当前工具
   if (t === 'brush' || t === 'eraser') { // 笔刷的方框
-    const cell = B.cellAt(board, hx, hy)
-    if (!cell) return
+    const cell = B.cellAt(board, hx, hy) // 悬停的格子
+    if (!cell) return // 在画板外
     const off = Math.floor(brush.value / 2) // 和 brushCells 一样的偏移
-    ctx.strokeStyle = '#0f172a'
+    ctx.strokeStyle = '#0f172a' // 深色框
     ctx.strokeRect(board.x0 + cell[0] - off, board.y0 + cell[1] - off, brush.value, brush.value)
   } else if (t === 'door' || t === 'poly') { // 会吸到的格点
-    const [x, y] = snapVertex(hx, hy)
-    ctx.strokeStyle = '#0f172a'
+    const [x, y] = snapVertex(hx, hy) // 吸到的格点
+    ctx.strokeStyle = '#0f172a' // 深色圆圈
     ctx.beginPath(); ctx.arc(x, y, 5 * p, 0, 7); ctx.stroke()
   }
 }
@@ -482,10 +482,10 @@ const paintValue = () => (tool.value === 'eraser' ? 0 : color.value)
 /** 切工具（多边形画到一半切走就丢掉） */
 function setTool(t) {
   if (t === 'picker' && tool.value !== 'picker') prevTool = tool.value // 记下来，吸完回去
-  tool.value = t
-  polyPts.value = []
-  hint.value = TOOL_HINT[t] || ''
-  requestDraw()
+  tool.value = t // 换工具
+  polyPts.value = [] // 丢掉没画完的多边形
+  hint.value = TOOL_HINT[t] || '' // 显示这个工具的用法
+  requestDraw() // 预览要换
 }
 const TOOL_HINT = {
   select: '点色块选中一家商户，在下面填店名、业态', pan: '拖动地图',
@@ -497,8 +497,8 @@ const TOOL_HINT = {
 
 /** 离 (x, y) 最近的格点的场景坐标 */
 function snapVertex(x, y) {
-  const [i, j] = B.vertexNear(board, x, y)
-  return B.vertexPos(board, i, j)
+  const [i, j] = B.vertexNear(board, x, y) // 最近的格点
+  return B.vertexPos(board, i, j) // 格点的坐标
 }
 
 // 撤销 / 重做: 每条记 {diff 格子改动（可为空）, before / after 改动前后的商户列表}
@@ -511,23 +511,23 @@ const redoStack = shallowRef([])
  */
 function commitEdit(edit) {
   const d = B.endEdit(board, edit) // 这次实际改了哪些格
-  if (!d.idx.length) return false
+  if (!d.idx.length) return false // 什么都没变（涂了同样的颜色）
   const before = survey.value.shops // 改之前的商户列表（数组是整体替换的，直接留引用）
-  afterCells(d.idx, true)
+  afterCells(d.idx, true) // 按重叠对号
   undoStack.value = [...undoStack.value.slice(-99), { diff: d, before, after: survey.value.shops }] // 最多留 100 步
-  redoStack.value = []
-  return true
+  redoStack.value = [] // 新的操作之后不能再重做
+  return true // 有改动
 }
 
 /** 格子变了之后: 涂色层、分块编码、连通块对号 */
 function afterCells(idx, usePrev) {
-  updatePaint(idx)
+  updatePaint(idx) // 先更新像素
   const tiles = {} // 改动涉及的块 → 新的游程编码
   for (const id of B.tilesOfCells(board, idx)) {
-    const [r, c] = B.parseTileId(id)
-    tiles[id] = B.encodeTile(board, r, c)
+    const [r, c] = B.parseTileId(id) // 块编号 → 行列
+    tiles[id] = B.encodeTile(board, r, c) // 整块重新编码
   }
-  survey.value = relabel(M.setTiles(survey.value, tiles, surveyor.value), usePrev)
+  survey.value = relabel(M.setTiles(survey.value, tiles, surveyor.value), usePrev) // 写分块、重新对号
 }
 
 const META = ['name', 'category', 'floor', 'hours', 'note'] // 店的属性（撤销只撤形状和门，不撤后来填的店名）
@@ -535,46 +535,46 @@ const META = ['name', 'category', 'floor', 'hours', 'note'] // 店的属性（�
 /** 撤销 / 重做时把商户列表换回快照: 属性用现在的，形状和门用快照的；快照里没有的画板商户删掉 */
 function restoreShops(snapshot) {
   const cur = new Map(survey.value.shops.map((s) => [s.id, s])) // 现在的记录
-  const snapIds = new Set(snapshot.map((s) => s.id))
+  const snapIds = new Set(snapshot.map((s) => s.id)) // 快照里的编号
   const next = snapshot.map((s) => {
-    const c = cur.get(s.id)
+    const c = cur.get(s.id) // 同编号的现有记录
     return c ? { ...s, ...Object.fromEntries(META.map((k) => [k, c[k]])) } : s // 保留现在的属性
   })
   for (const c of survey.value.shops) if (!snapIds.has(c.id)) next.push(c.seed && !c.deleted ? { ...c, deleted: true, doors: [] } : c) // 之后新建的店: 删掉
   const changed = new Set(next.filter((s) => B.canon(s) !== B.canon(cur.get(s.id) || {})).map((s) => s.id)) // 真有变化的才换时间
-  survey.value = stamp(survey.value, next, changed)
+  survey.value = stamp(survey.value, next, changed) // 有变化的记人和时间
 }
 
 /** 撤销 */
 function undo() {
-  const e = undoStack.value.at(-1)
-  if (!e) return
-  undoStack.value = undoStack.value.slice(0, -1)
+  const e = undoStack.value.at(-1) // 最近一步
+  if (!e) return // 没有可撤销的
+  undoStack.value = undoStack.value.slice(0, -1) // 出栈
   if (e.diff) B.undoDiff(board, e.diff) // 格子改回去
-  restoreShops(e.before)
+  restoreShops(e.before) // 商户列表换回改之前的
   if (e.diff) afterCells(e.diff.idx, false) // 按种子重新对号（快照里的种子对应的正是改之前的画板）
-  redoStack.value = [...redoStack.value, e]
+  redoStack.value = [...redoStack.value, e] // 可以重做了
 }
 
 /** 重做 */
 function redo() {
-  const e = redoStack.value.at(-1)
-  if (!e) return
-  redoStack.value = redoStack.value.slice(0, -1)
-  if (e.diff) B.redoDiff(board, e.diff)
-  restoreShops(e.after)
-  if (e.diff) afterCells(e.diff.idx, false)
-  undoStack.value = [...undoStack.value, e]
+  const e = redoStack.value.at(-1) // 最近撤销的一步
+  if (!e) return // 没有可重做的
+  redoStack.value = redoStack.value.slice(0, -1) // 出栈
+  if (e.diff) B.redoDiff(board, e.diff) // 格子改成之后的颜色
+  restoreShops(e.after) // 商户列表换成改之后的
+  if (e.diff) afterCells(e.diff.idx, false) // 按种子对号
+  undoStack.value = [...undoStack.value, e] // 又可以撤销了
 }
 
 /** 同步拿到别人画的之后: 整块画板按分块重铺，重新对号；撤销栈清掉（画板已经不是撤销记录里的样子了） */
 function reloadBoard() {
-  board.data.fill(0)
-  B.loadTiles(board, survey.value.tiles)
-  rebuildPaint()
-  survey.value = relabel(survey.value, false)
-  undoStack.value = []
-  redoStack.value = []
+  board.data.fill(0) // 先清空
+  B.loadTiles(board, survey.value.tiles) // 按分块铺
+  rebuildPaint() // 涂色层整张重画
+  survey.value = relabel(survey.value, false) // 按种子对号
+  undoStack.value = [] // 撤销记录失效
+  redoStack.value = [] // 重做记录失效
 }
 
 // --- 各工具的按下 / 移动 / 抬起 ---
@@ -583,11 +583,11 @@ function toolDown(g, x, y) {
   const t = tool.value, cell = B.cellAt(board, x, y) // 当前工具和按下的格子
   if (t === 'brush' || t === 'eraser') {
     g.edit = B.beginEdit() // 整个一笔是一次操作
-    g.last = cell
+    g.last = cell // 记下这一格，移动时连线
     if (cell) { const cells = B.brushCells(board, cell[0], cell[1], brush.value); B.paint(board, g.edit, cells, paintValue()); updatePaint(cells) }
   } else if (t === 'rect') {
     const [c, r] = clampCell(x, y) // 从画板外拖进来也行
-    g.rect = { c0: c, r0: r, c1: c, r1: r }
+    g.rect = { c0: c, r0: r, c1: c, r1: r } // 起点 = 终点
   }
 }
 
@@ -599,18 +599,18 @@ function clampCell(x, y) {
 /** 移动 */
 function toolMove(g, x, y) {
   if (g.edit) { // 画笔 / 橡皮: 和上一个点连成线（手指快时不断）
-    const cell = B.cellAt(board, x, y)
+    const cell = B.cellAt(board, x, y) // 当前格子
     if (!cell) { g.last = null; return } // 移出画板
-    const from = g.last || cell
-    const cells = B.lineCells(board, from[0], from[1], cell[0], cell[1], brush.value)
-    B.paint(board, g.edit, cells, paintValue())
+    const from = g.last || cell // 上一个点（刚进画板时就是自己）
+    const cells = B.lineCells(board, from[0], from[1], cell[0], cell[1], brush.value) // 两点之间连线
+    B.paint(board, g.edit, cells, paintValue()) // 涂上
     updatePaint(cells) // 只更新像素，抬手时才重新对号
-    g.last = cell
+    g.last = cell // 记下来
   } else if (g.rect) {
-    const [c, r] = clampCell(x, y)
-    g.rect.c1 = c
+    const [c, r] = clampCell(x, y) // 截到画板里
+    g.rect.c1 = c // 更新矩形的另一角
     g.rect.r1 = r
-    requestDraw()
+    requestDraw() // 预览要换
   }
 }
 
@@ -618,12 +618,12 @@ function toolMove(g, x, y) {
 function toolUp(g, x, y, tap) {
   if (g.edit) return commitEdit(g.edit) // 画笔 / 橡皮: 一笔结束
   if (g.rect) { // 矩形: 落下
-    const { c0, r0, c1, r1 } = g.rect
-    g.rect = null
-    const e = B.beginEdit()
-    B.paint(board, e, B.rectCells(board, c0, r0, c1, r1), paintValue())
-    commitEdit(e)
-    return requestDraw()
+    const { c0, r0, c1, r1 } = g.rect // 两个角
+    g.rect = null // 清掉预览
+    const e = B.beginEdit() // 一次操作
+    B.paint(board, e, B.rectCells(board, c0, r0, c1, r1), paintValue()) // 涂上整个矩形
+    commitEdit(e) // 对号、进撤销栈
+    return requestDraw() // 清掉预览
   }
   if (tap) tapAt(x, y) // 其余工具都是点一下
 }
@@ -631,30 +631,30 @@ function toolUp(g, x, y, tap) {
 /** 第二根手指按下: 取消正在进行的划区（改成双指缩放） */
 function toolCancel(g) {
   if (g.edit) { const d = B.endEdit(board, g.edit); B.undoDiff(board, d); updatePaint(d.idx); g.edit = null } // 已经涂上的格子还原
-  g.rect = null
-  requestDraw()
+  g.rect = null // 清掉矩形预览
+  requestDraw() // 预览要换
 }
 
 /** 点一下 */
 function tapAt(x, y) {
-  const t = tool.value
-  if (t === 'select') return selectAt(x, y)
+  const t = tool.value // 当前工具
+  if (t === 'select') return selectAt(x, y) // 选择工具
   if (t === 'picker') { // 吸管: 取色后回到原来的工具
     const cell = B.cellAt(board, x, y), v = cell ? B.get(board, ...cell) : 0
-    if (v) color.value = v
-    return setTool(prevTool)
+    if (v) color.value = v // 空白格不取
+    return setTool(prevTool) // 回到原来的工具
   }
-  if (t === 'fill') return bucket(x, y)
-  if (t === 'poly') return polyTap(x, y)
-  if (t === 'door') return doorTap(x, y)
+  if (t === 'fill') return bucket(x, y) // 油漆桶
+  if (t === 'poly') return polyTap(x, y) // 多边形
+  if (t === 'door') return doorTap(x, y) // 门口
 }
 
 /** 选择: 先看是不是点到了门（12 像素内），再看点到哪个色块 */
 function selectAt(x, y) {
   const r = Math.max(0.3, 12 * px.value) // 门的点选半径
-  const hit = liveBoardShops.value.find((s) => (s.doors || []).some((d) => Math.hypot(d.pos[0] - x, d.pos[1] - y) < r))
-  if (hit) return (selectedId.value = hit.id)
-  const cell = B.cellAt(board, x, y)
+  const hit = liveBoardShops.value.find((s) => (s.doors || []).some((d) => Math.hypot(d.pos[0] - x, d.pos[1] - y) < r)) // 点到了哪家店的门
+  if (hit) return (selectedId.value = hit.id) // 选中这家店
+  const cell = B.cellAt(board, x, y) // 点到的格子
   const L = cell && labeled ? labeled.labels[cell[1] * board.w + cell[0]] : 0 // 点到的块号
   selectedId.value = L ? owner.get(L) || null : null // 点空白 = 取消选择
 }
@@ -662,102 +662,102 @@ function selectAt(x, y) {
 /** 油漆桶 */
 function bucket(x, y) {
   const cell = B.cellAt(board, x, y)
-  if (!cell) return
+  if (!cell) return // 点在画板外
   const [c, r] = cell, v = B.get(board, c, r), target = paintValue() // 点到的颜色、要涂的颜色
-  let cells
-  if (v) {
-    if (v === target) return (hint.value = '已经是这个颜色了')
+  let cells // 要涂的格子
+  if (v) { // 点到色块
+    if (v === target) return (hint.value = '已经是这个颜色了') // 颜色一样不用换
     cells = B.floodCells(board, c, r) // 整个色块换色
-  } else {
+  } else { // 点到空白
     const bld = buildingAtFast(x, y) // 点在哪栋楼的空白处
-    if (bld) {
+    if (bld) { // 在楼里
       const inside = new Set(B.polygonCells(board, bld.polygon, bld.holes || [])) // 这栋楼的格子
       cells = B.floodCells(board, c, r, { within: (cc, rr) => inside.has(rr * board.w + cc) }) // 只在楼里、被已有色块挡住
-    } else {
+    } else { // 在楼外
       cells = B.floodCells(board, c, r, { limit: 3000 }) // 楼外空地: 限制大小
       if (!cells) return (hint.value = '这片空地太大了，先用矩形或多边形圈出范围')
     }
     if (!target) return // 空白填空白，没意义
   }
-  const e = B.beginEdit()
-  B.paint(board, e, cells, target)
-  if (commitEdit(e)) hint.value = `填了 ${cells.length} 格（${cells.length} ㎡）`
+  const e = B.beginEdit() // 一次操作
+  B.paint(board, e, cells, target) // 涂上
+  if (commitEdit(e)) hint.value = `填了 ${cells.length} 格（${cells.length} ㎡）` // 提示填了多大
 }
 
 /** 多边形: 点顶点；点回起点闭合 */
 function polyTap(x, y) {
   const p = snapVertex(x, y) // 顶点吸到格点，边界齐整
-  const pts = polyPts.value
+  const pts = polyPts.value // 已点的顶点
   if (pts.length >= 3 && Math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) < Math.max(0.5, 14 * px.value)) return closePoly() // 点回起点
-  const last = pts.at(-1)
+  const last = pts.at(-1) // 上一个顶点
   if (last && last[0] === p[0] && last[1] === p[1]) return // 同一个格点点了两次
-  polyPts.value = [...pts, p]
+  polyPts.value = [...pts, p] // 加一个顶点
   hint.value = pts.length + 1 >= 3 ? `已点 ${pts.length + 1} 个顶点，点回起点或按「闭合」` : '继续点下一个顶点'
-  requestDraw()
+  requestDraw() // 预览要换
 }
 
 /** 闭合多边形并涂色 */
 function closePoly() {
-  const pts = polyPts.value
-  polyPts.value = []
+  const pts = polyPts.value // 所有顶点
+  polyPts.value = [] // 清掉预览
   if (pts.length < 3) return (hint.value = '至少要 3 个顶点')
-  const e = B.beginEdit()
-  const cells = B.polygonCells(board, pts)
-  B.paint(board, e, cells, paintValue())
-  if (commitEdit(e)) hint.value = `多边形 ${cells.length} ㎡`
-  requestDraw()
+  const e = B.beginEdit() // 一次操作
+  const cells = B.polygonCells(board, pts) // 多边形盖住的格子
+  B.paint(board, e, cells, paintValue()) // 涂上
+  if (commitEdit(e)) hint.value = `多边形 ${cells.length} ㎡` // 提示面积
+  requestDraw() // 预览要换
 }
 
 /** 门口: 放在色块边缘的格点上；点已有的门换到下一个合法朝向 */
 function doorTap(x, y) {
   const prefer = selectedId.value ? labelOf.value.get(selectedId.value) || 0 : 0 // 优先给选中的店
-  const pd = B.placeDoor(board, labeled.labels, x, y, prefer)
-  if (!pd) return (hint.value = '门要放在色块边缘的格点上（格子的角）')
-  const id = owner.get(pd.label), shop = shopById.value.get(id)
-  const doors = shop.doors || []
+  const pd = B.placeDoor(board, labeled.labels, x, y, prefer) // 吸到格点、挑店、挑朝向
+  if (!pd) return (hint.value = '门要放在色块边缘的格点上（格子的角）') // 附近没有边缘格点
+  const id = owner.get(pd.label), shop = shopById.value.get(id) // 这扇门属于哪家店
+  const doors = shop.doors || [] // 这家店现有的门
   const k = doors.findIndex((d) => d.i === pd.i && d.j === pd.j) // 这个格点上已经有门了吗
-  let next
-  if (k >= 0) {
+  let next // 改完的门列表
+  if (k >= 0) { // 这个格点已经有门: 换朝向
     if (pd.dirs.length < 2) return (selectedId.value = id, hint.value = `这里只能朝${B.DIR_NAME[pd.dirs[0]]}；要删除在下面的门列表里点 ×`)
     const nd = pd.dirs[(pd.dirs.indexOf(doors[k].dir) + 1) % pd.dirs.length] // 轮到下一个朝向
-    next = doors.map((d, m) => (m === k ? { ...d, dir: nd } : d))
-    hint.value = `门改朝${B.DIR_NAME[nd]}`
-  } else {
-    next = [...doors, { i: pd.i, j: pd.j, dir: pd.dir }]
+    next = doors.map((d, m) => (m === k ? { ...d, dir: nd } : d)) // 换成下一个朝向
+    hint.value = `门改朝${B.DIR_NAME[nd]}` // 提示新朝向
+  } else { // 新的格点: 加门
+    next = [...doors, { i: pd.i, j: pd.j, dir: pd.dir }] // 朝向用 placeDoor 挑的
     hint.value = `加了一扇朝${B.DIR_NAME[pd.dir]}的门` + (pd.dirs.length > 1 ? '，在拐角上再点一下换朝向' : '')
   }
-  selectedId.value = id
-  setDoors(id, next)
+  selectedId.value = id // 选中这家店
+  setDoors(id, next) // 写进数据
 }
 
 /** 改一家店的门（带场景坐标和法线），可撤销 */
 function setDoors(id, doors) {
-  const shop = shopById.value.get(id)
-  if (!shop) return
-  const before = survey.value.shops
-  const next = { ...shop, doors: doors.map((d) => ({ i: d.i, j: d.j, dir: d.dir, ...B.doorGeom(board, d) })) }
+  const shop = shopById.value.get(id) // 这家店现在的记录
+  if (!shop) return // 店已经不在了
+  const before = survey.value.shops // 改之前的商户列表
+  const next = { ...shop, doors: doors.map((d) => ({ i: d.i, j: d.j, dir: d.dir, ...B.doorGeom(board, d) })) } // 门带上坐标和法线
   survey.value = M.upsertShop(survey.value, next, surveyor.value) // 记人、时间、日志
-  undoStack.value = [...undoStack.value.slice(-99), { diff: null, before, after: survey.value.shops }]
-  redoStack.value = []
-  requestDraw()
+  undoStack.value = [...undoStack.value.slice(-99), { diff: null, before, after: survey.value.shops }] // 进撤销栈
+  redoStack.value = [] // 新的操作之后不能再重做
+  requestDraw() // 门变了要重画
 }
 
 /** 选中的店整块擦掉（可撤销） */
 function eraseSelected() {
-  const L = labelOf.value.get(selectedId.value)
-  if (!L) return
-  const e = B.beginEdit()
-  B.paint(board, e, labeled.comps[L].cells, 0)
-  commitEdit(e)
-  selectedId.value = null
+  const L = labelOf.value.get(selectedId.value) // 选中店的块号
+  if (!L) return // 没选中
+  const e = B.beginEdit() // 一次操作
+  B.paint(board, e, labeled.comps[L].cells, 0) // 整块擦成空白
+  commitEdit(e) // 对号（这家店变墓碑）、进撤销栈
+  selectedId.value = null // 取消选择
 }
 
 /** 自动挑一个和屏幕中心附近都不一样的颜色（新开一家店，免得和旁边的店连成一家） */
 function newColor() {
-  const [c, r] = clampCell(view.cx, view.cy)
-  color.value = B.freeColor(board, c, r, Math.max(12, Math.round(view.w / 4)), color.value)
+  const [c, r] = clampCell(view.cx, view.cy) // 屏幕中心的格子
+  color.value = B.freeColor(board, c, r, Math.max(12, Math.round(view.w / 4)), color.value) // 找周围没用过的颜色
   if (tool.value === 'eraser' || tool.value === 'select' || tool.value === 'pan') setTool('brush') // 换好颜色直接画
-  hint.value = '换了一个附近没用过的颜色，画出来就是一家新店'
+  hint.value = '换了一个附近没用过的颜色，画出来就是一家新店' // 提示
 }
 
 // ---------------------------------------------------------------------------
@@ -779,39 +779,39 @@ watch([selOutline, liveBoardShops], requestDraw) // 轮廓 / 门变了要重画
 
 /** 表单写回（只有真的改了才记一条） */
 function saveForm() {
-  const s = selShop.value
+  const s = selShop.value // 选中的店
   if (!s || META.every((k) => (s[k] ?? '') === form[k])) return
-  survey.value = M.upsertShop(survey.value, { ...s, ...form }, surveyor.value)
+  survey.value = M.upsertShop(survey.value, { ...s, ...form }, surveyor.value) // 写进数据（记人、时间、日志）
 }
 
 /** 删一扇门 */
 function removeDoor(k) {
-  setDoors(selShop.value.id, selShop.value.doors.filter((_, m) => m !== k))
+  setDoors(selShop.value.id, selShop.value.doors.filter((_, m) => m !== k)) // 去掉第 k 扇
 }
 
 /** 地图移到这扇门并放大 */
 function focusDoor(d) {
-  Object.assign(view, { cx: d.pos[0], cy: d.pos[1], w: Math.min(view.w, 30) })
+  Object.assign(view, { cx: d.pos[0], cy: d.pos[1], w: Math.min(view.w, 30) }) // 最多放大到 30 米宽
 }
 
 /** 改屏幕中心那一格的考察状态 */
 function setCell(status) {
-  if (centerCell.value) survey.value = M.setCellStatus(survey.value, centerCell.value, status, surveyor.value)
+  if (centerCell.value) survey.value = M.setCellStatus(survey.value, centerCell.value, status, surveyor.value) // 十字不在网格里就不改
 }
 const CELL_FILL = { doing: 'rgba(250,204,21,0.16)', done: 'rgba(34,197,94,0.16)', review: 'rgba(239,68,68,0.18)' } // 考察格状态底色
 const statusOf = (id) => survey.value.cells[id]?.status || 'todo' // 没记录就是「未查」
 
 // 进度: 已完成的考察格 / 有楼的考察格，画了几家店
 const busyCells = computed(() => {
-  if (!grid.value || !scene.value) return new Set()
-  const s = new Set()
+  if (!grid.value || !scene.value) return new Set() // 场景还没读到
+  const s = new Set() // 有楼的格子
   for (const b of scene.value.buildings) s.add(M.cellAt(grid.value, ...M.centroid(b.polygon))) // 按楼的中心算它在哪一格
-  s.delete(null)
-  return s
+  s.delete(null) // 网格外的楼不算
+  return s // 返回集合
 })
-const doneCount = computed(() => [...busyCells.value].filter((c) => survey.value.cells[c]?.status === 'done').length)
-const shopCount = computed(() => liveBoardShops.value.length)
-const doorCount = computed(() => liveBoardShops.value.reduce((n, s) => n + (s.doors || []).length, 0))
+const doneCount = computed(() => [...busyCells.value].filter((c) => survey.value.cells[c]?.status === 'done').length) // 有楼且已完成的格子数
+const shopCount = computed(() => liveBoardShops.value.length) // 画板上的店数
+const doorCount = computed(() => liveBoardShops.value.reduce((n, s) => n + (s.doors || []).length, 0)) // 所有门数
 
 // ---------------------------------------------------------------------------
 // 手势: 单指 / 左键 = 当前工具；双指 = 缩放平移；右键 / 中键 / 空格 + 拖 / 平移工具 = 平移；滚轮缩放
@@ -822,47 +822,47 @@ let spaceDown = false // 按住空格临时平移（电脑上）
 
 function onDown(e) {
   cv.value.setPointerCapture(e.pointerId) // 手指移出画布也继续收到 move / up
-  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
-  if (pointers.size === 1) {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY }) // 记下起点
+  if (pointers.size === 1) { // 第一根手指 / 鼠标
     const pan = e.button === 1 || e.button === 2 || tool.value === 'pan' || spaceDown // 这一下是不是平移
-    gesture = { mode: pan ? 'pan' : 'tool', x0: e.clientX, y0: e.clientY, t0: Date.now(), moved: false }
-    if (!pan && board) toolDown(gesture, ...toScene(e.clientX, e.clientY))
-  } else {
+    gesture = { mode: pan ? 'pan' : 'tool', x0: e.clientX, y0: e.clientY, t0: Date.now(), moved: false } // 可能是点一下，也可能是拖
+    if (!pan && board) toolDown(gesture, ...toScene(e.clientX, e.clientY)) // 工具开始
+  } else { // 第二根手指
     if (gesture?.mode === 'tool') toolCancel(gesture) // 第二根手指: 取消划区，改成缩放
-    gesture = { mode: 'pinch', moved: true }
+    gesture = { mode: 'pinch', moved: true } // 双指缩放
   }
 }
 
 function onMove(e) {
-  const p = pointers.get(e.pointerId)
+  const p = pointers.get(e.pointerId) // 这根手指上一次的位置
   if (!p) { // 没按下（鼠标悬停）: 只更新预览
-    if (board) { hover.value = toScene(e.clientX, e.clientY); requestDraw() }
-    return
+    if (board) { hover.value = toScene(e.clientX, e.clientY); requestDraw() } // 只更新悬停预览
+    return // 没按下就不处理拖动
   }
-  if (gesture?.mode === 'pinch' && pointers.size === 2) {
+  if (gesture?.mode === 'pinch' && pointers.size === 2) { // 双指
     const other = [...pointers.values()].find((q) => q !== p) // 另一根手指
     const d0 = Math.hypot(p.x - other.x, p.y - other.y), d1 = Math.hypot(e.clientX - other.x, e.clientY - other.y) // 两指距离前后
     view.cx -= ((e.clientX - p.x) / 2) * px.value // 两指中点移动 = 平移（这根手指动了一半）
-    view.cy -= ((e.clientY - p.y) / 2) * px.value
+    view.cy -= ((e.clientY - p.y) / 2) * px.value // 纵向同理
     if (d0 > 0) zoomAt((e.clientX + other.x) / 2, (e.clientY + other.y) / 2, d1 / d0) // 距离变大 = 放大
-  } else if (gesture?.mode === 'pan') {
+  } else if (gesture?.mode === 'pan') { // 平移
     view.cx -= (e.clientX - p.x) * px.value // 往右拖 = 视口往左移
-    view.cy -= (e.clientY - p.y) * px.value
-  } else if (gesture?.mode === 'tool') {
-    toolMove(gesture, ...toScene(e.clientX, e.clientY))
+    view.cy -= (e.clientY - p.y) * px.value // 往下拖 = 视口往上移
+  } else if (gesture?.mode === 'tool') { // 工具
+    toolMove(gesture, ...toScene(e.clientX, e.clientY)) // 交给当前工具
   }
-  p.x = e.clientX
-  p.y = e.clientY
+  p.x = e.clientX // 更新这根手指的位置
+  p.y = e.clientY // 纵向同理
   if (gesture && Math.hypot(e.clientX - gesture.x0, e.clientY - gesture.y0) > 8) gesture.moved = true // 超过 8 像素不算点一下
 }
 
 function onUp(e) {
-  if (!pointers.has(e.pointerId)) return
-  pointers.delete(e.pointerId)
+  if (!pointers.has(e.pointerId)) return // 不是我们记下的指针
+  pointers.delete(e.pointerId) // 这根手指抬起了
   if (pointers.size) return // 还有手指按着
-  if (gesture?.mode === 'tool') toolUp(gesture, ...toScene(e.clientX, e.clientY), !gesture.moved && Date.now() - gesture.t0 < 600)
-  gesture = null
-  requestDraw()
+  if (gesture?.mode === 'tool') toolUp(gesture, ...toScene(e.clientX, e.clientY), !gesture.moved && Date.now() - gesture.t0 < 600) // 工具结束（没怎么动、不太久 = 点一下）
+  gesture = null // 手势结束
+  requestDraw() // 清掉预览
 }
 
 /** 滚轮缩放 */
@@ -873,18 +873,18 @@ function onWheel(e) {
 /** 键盘快捷键（电脑上）: 工具字母、Ctrl+Z / Ctrl+Y、[ ] 笔刷大小、Enter 闭合多边形、Esc 取消、空格平移 */
 function onKey(e) {
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return // 在填表单
-  const k = e.key.toLowerCase()
-  if (e.type === 'keyup') { if (k === ' ') spaceDown = false; return }
-  if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); return e.shiftKey ? redo() : undo() }
-  if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); return redo() }
+  const k = e.key.toLowerCase() // 统一小写
+  if (e.type === 'keyup') { if (k === ' ') spaceDown = false; return } // 松开空格
+  if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); return e.shiftKey ? redo() : undo() } // Ctrl+Z 撤销，Ctrl+Shift+Z 重做
+  if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); return redo() } // Ctrl+Y 重做
   if (e.ctrlKey || e.metaKey || e.altKey) return // 别的组合键留给浏览器
-  if (k === ' ') { spaceDown = true; e.preventDefault(); return }
-  const t = TOOLS.find((x) => x.key === k)
-  if (t) return setTool(t.id)
-  if (k === '[' || k === ']') { const n = BRUSHES.indexOf(brush.value) + (k === ']' ? 1 : -1); brush.value = BRUSHES[Math.max(0, Math.min(BRUSHES.length - 1, n))]; return requestDraw() }
-  if (k === 'enter' && polyPts.value.length) return closePoly()
-  if (k === 'escape') { polyPts.value = []; selectedId.value = null; hint.value = ''; return requestDraw() }
-  if (k === 'n') return newColor()
+  if (k === ' ') { spaceDown = true; e.preventDefault(); return } // 按住空格临时平移
+  const t = TOOLS.find((x) => x.key === k) // 工具字母
+  if (t) return setTool(t.id) // 切工具
+  if (k === '[' || k === ']') { const n = BRUSHES.indexOf(brush.value) + (k === ']' ? 1 : -1); brush.value = BRUSHES[Math.max(0, Math.min(BRUSHES.length - 1, n))]; return requestDraw() } // [ ] 调笔刷大小
+  if (k === 'enter' && polyPts.value.length) return closePoly() // 回车闭合多边形
+  if (k === 'escape') { polyPts.value = []; selectedId.value = null; hint.value = ''; return requestDraw() } // Esc 取消
+  if (k === 'n') return newColor() // N 换新店颜色
 }
 
 // ---------------------------------------------------------------------------
@@ -896,22 +896,22 @@ const locating = ref(false) // 定位按钮是否按下
 
 /** 开 / 关定位；第一次拿到位置时把地图移过去 */
 function toggleLocate() {
-  if (locating.value) {
-    navigator.geolocation.clearWatch(watchId)
-    locating.value = false
-    me.value = null
-    return requestDraw()
+  if (locating.value) { // 已经开着: 关掉
+    navigator.geolocation.clearWatch(watchId) // 停止监听
+    locating.value = false // 按钮弹起
+    me.value = null // 蓝点去掉
+    return requestDraw() // 重画
   }
-  if (!navigator.geolocation) return (hint.value = '这个浏览器不支持定位')
-  locating.value = true
+  if (!navigator.geolocation) return (hint.value = '这个浏览器不支持定位') // 不支持定位
+  locating.value = true // 按钮按下
   let first = true // 第一次才移地图
-  watchId = navigator.geolocation.watchPosition(
+  watchId = navigator.geolocation.watchPosition( // 持续监听位置
     (p) => {
       const [x, y] = geo.value.toScene(p.coords.longitude, p.coords.latitude) // GPS 是 WGS84，换成场景米
       me.value = { x, y, acc: p.coords.accuracy } // accuracy = 定位精度（米）
       if (first) Object.assign(view, { cx: x, cy: y, w: Math.min(view.w, 80) }) // 移到自己的位置，放大到能画的尺度
-      first = false
-      requestDraw()
+      first = false // 之后不再抢着移地图
+      requestDraw() // 蓝点移动
     },
     (err) => { hint.value = '定位失败: ' + (err.code === 1 ? '没有权限（手机上需要 https 访问）' : err.message); locating.value = false },
     { enableHighAccuracy: true, maximumAge: 5000 }, // 高精度，5 秒内的旧位置可以复用
@@ -923,17 +923,17 @@ function toggleLocate() {
 // ---------------------------------------------------------------------------
 /** 让浏览器下载一段文本 */
 function download(name, text, type) {
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(new Blob([text], { type }))
-  a.download = name
-  a.click()
+  const a = document.createElement('a') // 临时的下载链接
+  a.href = URL.createObjectURL(new Blob([text], { type })) // 文本包成 Blob 地址
+  a.download = name // 下载时的文件名
+  a.click() // 触发下载
   setTimeout(() => URL.revokeObjectURL(a.href), 1000) // 稍后释放
 }
 const fileBase = () => surveyKey.value.replace('/', '_') + '-survey' // 下载文件名前缀
 /** GeoJSON: 每家店的色块轮廓 + 门 */
 function exportGeoJSON() {
-  const outlines = new Map([...labelOf.value].map(([id, L]) => [id, B.outline(board, labeled.labels, labeled.comps[L])]))
-  download(fileBase() + '.geojson', JSON.stringify(M.toGeoJSON(survey.value, geo.value, outlines), null, 1), 'application/geo+json')
+  const outlines = new Map([...labelOf.value].map(([id, L]) => [id, B.outline(board, labeled.labels, labeled.comps[L])])) // 每家店的色块轮廓
+  download(fileBase() + '.geojson', JSON.stringify(M.toGeoJSON(survey.value, geo.value, outlines), null, 1), 'application/geo+json') // 带轮廓导出
 }
 const exportCSV = () => download(fileBase() + '.csv', M.toCSV(survey.value, geo.value), 'text/csv') // Excel 能直接打开
 
@@ -943,54 +943,54 @@ const exportCSV = () => download(fileBase() + '.csv', M.toCSV(survey.value, geo.
 let ro = null // 尺寸监听器
 /** 画布尺寸跟着窗口变（手机横竖屏），按设备像素比放大 */
 function resize() {
-  const r = cv.value.getBoundingClientRect()
-  size.w = r.width || 1
-  size.h = r.height || 1
-  dpr = window.devicePixelRatio || 1
-  cv.value.width = Math.round(size.w * dpr)
-  cv.value.height = Math.round(size.h * dpr)
-  requestDraw()
+  const r = cv.value.getBoundingClientRect() // 画布在页面上的大小
+  size.w = r.width || 1 // CSS 像素宽
+  size.h = r.height || 1 // CSS 像素高
+  dpr = window.devicePixelRatio || 1 // 高分屏倍数
+  cv.value.width = Math.round(size.w * dpr) // 画布实际像素宽
+  cv.value.height = Math.round(size.h * dpr) // 画布实际像素高
+  requestDraw() // 尺寸变了要重画
 }
 watch(view, requestDraw) // 平移缩放都要重画
 watch(() => survey.value.cells, requestDraw) // 考察格状态变了
 
 onMounted(async () => {
-  ctx = cv.value.getContext('2d')
-  ro = new ResizeObserver(resize)
-  ro.observe(cv.value)
-  resize()
-  window.addEventListener('keydown', onKey)
-  window.addEventListener('keyup', onKey)
+  ctx = cv.value.getContext('2d') // 2D 上下文
+  ro = new ResizeObserver(resize) // 尺寸监听
+  ro.observe(cv.value) // 开始监听
+  resize() // 先取一次尺寸
+  window.addEventListener('keydown', onKey) // 快捷键
+  window.addEventListener('keyup', onKey) // 松开空格
   try {
-    const r = await fetch(sceneUrl)
-    if (!r.ok) throw new Error(r.status)
+    const r = await fetch(sceneUrl) // 读场景 JSON
+    if (!r.ok) throw new Error(r.status) // 404 等
     scene.value = await r.json() // 楼、路、区域、地理位置都在里面
   } catch (e) {
-    loadError.value = `读不到场景 ${sceneId}（${e.message}）`
-    return
+    loadError.value = `读不到场景 ${sceneId}（${e.message}）` // 页面上显示红色提示
+    return // 后面都做不了
   }
-  const sc = scene.value
+  const sc = scene.value // 场景
   board = B.makeBoard(sc.bounds) // 1 米格画板
   grid.value = M.makeGrid({ minX: board.x0, minY: board.y0, maxX: board.x0 + board.w, maxY: board.y0 + board.h }, B.TILE) // 考察格和分块对齐
   bldBoxes = sc.buildings.map((b) => { const xs = b.polygon.map((p) => p[0]), ys = b.polygon.map((p) => p[1]); return [b, Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] })
-  base = buildBase(sc)
+  base = buildBase(sc) // 底图路径
   // 先用本机存的数据（没网也能接着画），再和服务器同步一次
-  const local = readLocal(storeKey())
-  let s = local ? JSON.parse(local) : M.emptySurvey(surveyKey.value)
+  const local = readLocal(storeKey()) // 本机存的标注
+  let s = local ? JSON.parse(local) : M.emptySurvey(surveyKey.value) // 没有就从空白开始
   if (!s.tiles) s = { ...s, version: 2, tiles: {} } // 第 1 版数据: 补上画板分块
-  B.loadTiles(board, s.tiles)
-  rebuildPaint()
-  survey.value = relabel(s, false)
-  fitAll()
-  hint.value = TOOL_HINT[tool.value]
+  B.loadTiles(board, s.tiles) // 铺画板
+  rebuildPaint() // 涂色层
+  survey.value = relabel(s, false) // 按种子对号
+  fitAll() // 整个场景装进屏幕
+  hint.value = TOOL_HINT[tool.value] // 显示当前工具的用法
   doSync() // 拿到别人画的
 })
 onBeforeUnmount(() => {
-  ro?.disconnect()
-  if (watchId !== null) navigator.geolocation.clearWatch(watchId)
-  window.removeEventListener('keydown', onKey)
-  window.removeEventListener('keyup', onKey)
-  cancelAnimationFrame(raf)
+  ro?.disconnect() // 停止监听尺寸
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId) // 停止定位
+  window.removeEventListener('keydown', onKey) // 去掉快捷键
+  window.removeEventListener('keyup', onKey) // 去掉快捷键
+  cancelAnimationFrame(raf) // 取消没画的帧
 })
 </script>
 
