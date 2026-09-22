@@ -10,6 +10,11 @@
 //
 // 时间来自仿真时钟（引擎每个子步调 update(dt)），所以倍速下灯也跟着快。每个路口的相位起点随机，
 // 免得全城的灯同时变色。
+//
+// 场景编辑器可以逐个路口改（写在 roadGraph 节点上）:
+//   control: 'none'          这个路口不设灯（车按「一次放一辆」通过）
+//   signal: { green: [东西向绿灯秒数, 南北向绿灯秒数] }   两个方向不等长的绿灯，周期随之变化
+// 哪个轴算「东西向」: 轴里第一条进口道的方向更接近水平（|cos| ≥ |sin|）就是东西向。
 import * as THREE from 'three'
 
 const GREEN = 22, YELLOW = 3, ALL_RED = 2 // 秒（仿真时间）
@@ -45,7 +50,12 @@ export class Signals {
         if (d > Math.PI / 2) d = Math.PI - d // 再折到 [0, π/2]: 正对面的路夹角 0
         axisOf[arm.idx] = d < Math.PI / 4 ? 0 : 1
       }
-      this.nodes[id] = { t: rand() * CYCLE, axisOf } // 相位起点随机
+      if (n.control === 'none') continue // 编辑器指定这个路口不设灯
+      // 两个轴的绿灯时长: 编辑器按东西 / 南北给，这里换成按轴（0 轴是第一条进口道所在的轴）
+      const ew0 = Math.abs(Math.cos(arms[0].ang)) >= Math.abs(Math.sin(arms[0].ang)) // 0 轴是不是东西向
+      const gs = n.signal?.green // 编辑器给的 [东西, 南北] 绿灯秒数
+      const timing = makeTiming(gs ? (ew0 ? gs : [gs[1], gs[0]]) : [GREEN, GREEN])
+      this.nodes[id] = { t: rand() * timing.cycle, axisOf, timing } // 相位起点随机
     }
     // 每条斑马线 → 它横跨的那条路属于哪个路口的哪个轴；路段中途的斑马线（没有 node）为 null
     this.crosswalks = (scene.crosswalks || []).map((c) => {
@@ -64,7 +74,7 @@ export class Signals {
   state(nodeId, edgeIndex) {
     const n = this.nodes[nodeId]
     if (!n) return 'G'
-    return phaseOf(n.t, n.axisOf[edgeIndex] ?? 0)
+    return phaseOf(n.t, n.axisOf[edgeIndex] ?? 0, n.timing)
   }
 
   /**
@@ -75,13 +85,14 @@ export class Signals {
     const c = this.crosswalks[i]
     if (!c) return true
     const other = 1 - c.axis // 另一个轴
-    const local = (c.node.t + (other === 1 ? CYCLE / 2 : 0)) % CYCLE // 另一轴的周期内时间（1 轴错开半周期）
-    return local < WALK_WINDOW // 它的绿灯刚开始的那段时间
+    const tm = c.node.timing // 这个路口的配时
+    const local = localTime(c.node.t, other, tm) // 另一轴自己绿灯开始后过了多久
+    return local < Math.max(4, tm.green[other] - 9) // 它的绿灯刚开始的那段时间（留 9 秒清空斑马线，至少给 4 秒）
   }
 
   /** 推进相位；灯头颜色只在状态变化时写，避免每帧刷 instanceColor */
   update(dt) {
-    for (const n of Object.values(this.nodes)) n.t = (n.t + dt) % CYCLE // 相位时间回绕
+    for (const n of Object.values(this.nodes)) n.t = (n.t + dt) % n.timing.cycle // 相位时间回绕（各路口周期可以不同）
     if (!this.lampMesh) return // 还没 attachSites（比如关掉了车流）
     const c = this.lampMesh.instanceColor
     this.lamps.forEach((l, i) => {
@@ -134,10 +145,28 @@ export class Signals {
   }
 }
 
-/** 周期内时间 t 对某个轴而言是什么灯: 0 轴用 t 本身，1 轴错开半个周期 */
-export function phaseOf(t, axis) {
-  const local = (t + (axis === 1 ? CYCLE / 2 : 0)) % CYCLE
-  return local < GREEN ? 'G' : local < GREEN + YELLOW ? 'Y' : 'R'
+/**
+ * 一个路口的配时: 两个轴的绿灯时长 → 周期
+ * 周期 = 0 轴（绿 + 黄 + 全红）+ 1 轴（绿 + 黄 + 全红）；1 轴在 0 轴的全红结束后开始
+ * @param green [0 轴绿灯秒数, 1 轴绿灯秒数]，每个至少 5 秒
+ */
+export function makeTiming(green = [GREEN, GREEN]) {
+  const g = green.map((v) => Math.max(5, +v || GREEN)) // 非法值回到默认
+  return { green: g, start1: g[0] + YELLOW + ALL_RED, cycle: g[0] + g[1] + 2 * (YELLOW + ALL_RED) }
+}
+
+const DEFAULT_TIMING = makeTiming() // 两轴各 22 秒，周期 54 秒
+
+/** 周期内时间 t → 某个轴自己的「绿灯开始后过了多久」 */
+function localTime(t, axis, tm) {
+  return axis === 1 ? (t - tm.start1 + tm.cycle) % tm.cycle : t % tm.cycle
+}
+
+/** 周期内时间 t 对某个轴而言是什么灯（tm 缺省为两轴各 22 秒的默认配时: 1 轴正好错开半个周期） */
+export function phaseOf(t, axis, tm = DEFAULT_TIMING) {
+  const local = localTime(t, axis, tm)
+  const g = tm.green[axis] // 这个轴的绿灯时长
+  return local < g ? 'G' : local < g + YELLOW ? 'Y' : 'R'
 }
 
 /**

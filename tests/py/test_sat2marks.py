@@ -105,7 +105,7 @@ def test_session_save_and_resume(tmp_path):
     S.paint(bld, 1)
     S.dots.append({"kind": "portal", "x": 100.0, "y": 100.0})
     S.mpp = 0.42
-    marks = S.save()
+    marks, side = S.save()
     assert marks.exists() and S.labels_file.exists() and S.meta_file.exists()
     meta = json.loads(S.meta_file.read_text("utf-8"))
     assert meta["mpp"] == 0.42 and meta["dots"][0]["kind"] == "portal"
@@ -127,3 +127,199 @@ def test_lut_matches_map2scene_palette():
         assert c["color"].upper() in m2s_colors, c
     for c in s2m.DOT_COLORS.values():
         assert c.upper() in m2s_colors
+
+
+# ---------------------------------------------------------------------------
+# 自动候选 / 校准 / 层数 / 倾斜校正（合成一栋「歪」的高楼）
+# ---------------------------------------------------------------------------
+import satgeo as sg  # noqa: E402
+
+LEAN = (0.0, -0.5)  # 每米高度屋顶往上挪 0.5 像素
+SUN = (-0.6, -0.9)  # 每米高度影子往左上伸
+FOOT = (60, 70, 120, 90)  # 墙脚 x0, y0, x1, y1
+
+
+def leaning_image(height=30.0):
+    """160×120 的图: 一栋高 height 米的楼（剪影 = 墙脚沿倾斜方向扫过楼高）和它的影子"""
+    fp = np.zeros((120, 160), bool)
+    fp[FOOT[1]:FOOT[3], FOOT[0]:FOOT[2]] = True
+    sil = sg._sweep(fp, LEAN, height, "or")
+    shadow = sg._sweep(fp, SUN, height, "or") & ~sil
+    img = np.full((120, 160, 3), 170, np.uint8)
+    img[shadow] = 30
+    img[sil] = 215
+    return img, sil, fp
+
+
+def test_candidates_accept_reject(tmp_path):
+    S = make_session(tmp_path)
+    a = np.zeros((S.h, S.w), bool); a[20:60, 20:80] = True
+    b = np.zeros((S.h, S.w), bool); b[70:100, 100:140] = True
+    S.cands = [dict(id=0, crop=sg.crop(a), score=0.9, area_m2=600, state="pending"),
+               dict(id=1, crop=sg.crop(b), score=0.8, area_m2=300, state="pending")]
+    assert [c["id"] for c in S.cand_list()] == [0, 1]
+    assert S.cand_list()[0]["poly"]  # 轮廓点
+    patch = S.cand_accept([0], 11)
+    assert patch["bbox"] == [20, 20, 60, 40] and (S.labels[20:60, 20:80] == 11).all()
+    S.cand_reject([1])
+    assert S.cand_list() == []
+    assert S.do_undo()["ok"] and not S.labels.any()  # 接受是一步撤销
+
+
+def test_candidates_hidden_once_labelled(tmp_path):
+    S = make_session(tmp_path)
+    a = np.zeros((S.h, S.w), bool); a[20:60, 20:80] = True
+    S.cands = [dict(id=0, crop=sg.crop(a), score=0.9, area_m2=600, state="pending")]
+    S.paint(a, 3)  # 用户已经手工把这栋标了
+    assert S.cand_list() == []
+
+
+def test_building_list_and_floors(tmp_path):
+    S = make_session(tmp_path)
+    S.labels[20:60, 20:80] = 11
+    S.labels[70:100, 100:140] = 3
+    blds = S.building_list()
+    assert sorted(b["cls"] for b in blds) == [3, 11]
+    for b in blds:
+        x0, y0, sub = b["crop"]
+        assert sub[b["at"][1] - y0, b["at"][0] - x0]  # at 点在楼里
+        assert b["floors"] is None
+    S.floors = [{"x": 50, "y": 40, "floors": 20, "src": "auto"}]
+    S.set_floors(30, 30, 26)  # 手填覆盖同一栋里的 auto 记录
+    assert [f["floors"] for f in S.floors] == [26]
+    got = {b["cls"]: b["floors"] for b in S.building_list()}
+    assert got == {11: 26, 3: None}
+    S.set_floors(30, 30, 0)  # 清掉
+    assert S.floors == []
+
+
+def test_lean_correction_and_sidecar(tmp_path):
+    img, sil, fp = leaning_image(30)
+    S = make_session(tmp_path, img)
+    S.labels[sil] = 11
+    # 没校准: 导出原样
+    lab, _ = S.corrected_labels()
+    assert (lab == S.labels).all()
+    # 校准: 墙脚角 (60, 89) → 屋顶角 (60, 74)（30m × 0.5）→ 影子尖 (42, 62)，10 层 × 3m
+    S.calib = {"base": [60, 89], "roof": [60, 74], "tip": [42, 62], "floors": 10}
+    v = S.cal_vectors()["v"]
+    assert v == pytest.approx(LEAN)
+    S.floors = [{"x": 90, "y": 80, "floors": 10, "src": "manual"}]
+    lab, blds = S.corrected_labels()
+    got = lab == 11
+    iou = (got & fp).sum() / (got | fp).sum()
+    assert iou > 0.9  # 立面让出来了，剩下的就是墙脚
+    assert (S.labels == 11).sum() == sil.sum()  # labels 本身没动
+    marks, side = S.save()
+    data = json.loads(side.read_text("utf-8"))
+    assert data["buildings"][0]["floors"] == 10
+    ax, ay = data["buildings"][0]["at"]
+    assert fp[ay, ax]  # sidecar 的点落在墙脚里
+    feet = S.footprint_polys()
+    assert len(feet) == 1 and feet[0]["floors"] == 10
+
+
+def test_lean_correction_uses_class_median_and_skips_unknown(tmp_path):
+    img, sil, fp = leaning_image(30)
+    S = make_session(tmp_path, img)
+    S.labels[sil] = 11
+    S.labels[5:15, 5:15] = 3  # 另一类、没有层数: 不校正
+    S.calib = {"base": [60, 89], "roof": [60, 74], "tip": None, "floors": 10}
+    lab, blds = S.corrected_labels()
+    assert (lab == 11).sum() == sil.sum()  # 没有任何层数: 同类中位数也没有，不校正
+    assert (lab[5:15, 5:15] == 3).all()
+
+
+def test_heights_job_estimates_floors(tmp_path):
+    img, sil, fp = leaning_image(30)
+    S = make_session(tmp_path, img)
+    S.labels[sil] = 11
+    S.calib = {"base": [60, 89], "roof": [60, 74], "tip": [42, 62], "floors": 10}
+    msg = S.run_heights(lambda *a: None)
+    assert "1/1" in msg
+    assert S.floors and S.floors[0]["src"] == "auto"
+    assert S.floors[0]["floors"] == pytest.approx(10, abs=1)
+    # 没有影子尖: 报错
+    S.calib["tip"] = None
+    with pytest.raises(ValueError):
+        S.run_heights(lambda *a: None)
+
+
+def test_job_runner_reports_progress_and_errors(tmp_path):
+    import time as _t
+    S = make_session(tmp_path)
+    assert S.start_job("t", lambda prog: (prog(1, 2, "半"), "完成")[1]) == {"started": True}
+    for _ in range(100):
+        if not S.job["running"]:
+            break
+        _t.sleep(0.02)
+    assert S.job["msg"] == "完成" and S.job["done"] == 1 and S.job["error"] is None
+    S.start_job("坏", lambda prog: 1 / 0)
+    for _ in range(100):
+        if not S.job["running"]:
+            break
+        _t.sleep(0.02)
+    assert "ZeroDivisionError" in S.job["error"]
+
+
+def test_auto_buildings_without_sam(tmp_path):
+    img = np.full((200, 300, 3), (40, 140, 40), np.uint8)  # 绿地底（植被，会被排除）
+    img[20:60, 20:100] = 220  # 两个亮块
+    img[100:150, 180:260] = 220
+    S = make_session(tmp_path, img)
+    msg = S.run_auto_buildings(lambda *a: None)
+    assert "找到 2 个候选" in msg
+    assert S.cands_file.exists()
+    S2 = make_session(tmp_path, img)  # 缓存续用
+    assert len(S2.cands) == 2
+
+
+# ---------------------------------------------------------------------------
+# HTTP 路由: 起一个真的本地服务，走一遍主要请求
+# ---------------------------------------------------------------------------
+def test_http_routes(tmp_path):
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    img, sil, fp = leaning_image(30)
+    S = make_session(tmp_path, img)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), s2m.make_handler(S, None))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def call(path, body=None):
+        req = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), method="GET" if body is None else "POST")
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read())
+
+    try:
+        st = call("/state")
+        assert st["width"] == 160 and st["calib"] is None and 11 in st["buildingIds"]
+        assert call("/mpp_zoom", {"lat": 0, "zoom": 18})["mpp"] == pytest.approx(0.597, abs=1e-3)
+        mask_pts = [[60, 60], [120, 60], [120, 90], [60, 90]]
+        assert call("/polygon", {"cls": 11, "points": mask_pts})["patch"]
+        r = call("/calib", {"base": [60, 89], "roof": [60, 74], "tip": [42, 62], "floors": 10})
+        assert r["vectors"]["v"] == pytest.approx(list(LEAN))
+        assert call("/floors", {"x": 90, "y": 80, "floors": 12})["floors"][0]["floors"] == 12
+        assert call("/footprints")["feet"]
+        assert call("/cands") == {"cands": []}
+        assert call("/job")["running"] is False
+        assert call("/export", {})["ok"]
+        assert S.sidecar_file.exists()
+    finally:
+        srv.shutdown()
+
+
+def test_median_floors_not_lent_to_fragments(tmp_path):
+    img, sil, fp = leaning_image(30)
+    S = make_session(tmp_path, img)
+    S.labels[sil] = 11
+    S.labels[5:9, 5:9] = 11  # 一块碎片（16 像素 < 20 不算楼）
+    S.labels[100:106, 5:12] = 11  # 小碎片: 42 像素，远小于那栋楼
+    S.calib = {"base": [60, 89], "roof": [60, 74], "tip": None, "floors": 10}
+    S.floors = [{"x": 90, "y": 80, "floors": 10, "src": "manual"}]
+    lab, blds = S.corrected_labels()
+    frag = [b for b in blds if b["crop"][1] == 100][0]
+    assert frag["floors"] is None and "foot" not in frag  # 没借中位数，也没被校正
+    assert (lab[100:106, 5:12] == 11).all()

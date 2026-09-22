@@ -204,3 +204,16 @@ def test_geom_to_json_splits_multipolygon_and_drops_tiny():
     assert len(out) == 1
     assert len(out[0]["polygon"]) == 4 and len(out[0]["holes"]) == 1
     assert m2s.geom_to_json(Polygon()) == []
+
+
+def test_remove_by_id_with_numpy_payloads():
+    # 两个字典前两个字段相等、第三个是数组: list.remove 会在比到数组时抛异常，按身份删不会
+    a = dict(t="H", c=1.0, a=np.array([0.0, 1.0]))
+    b = dict(t="H", c=1.0, a=np.array([2.0, 3.0]))
+    lst = [a, b]
+    with pytest.raises(ValueError):
+        lst.remove(b)
+    m2s.remove_by_id(lst, b)
+    assert lst == [a] or (len(lst) == 1 and lst[0] is a)
+    with pytest.raises(ValueError):
+        m2s.remove_by_id(lst, b)

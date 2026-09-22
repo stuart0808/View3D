@@ -92,7 +92,7 @@ export class Traffic {
     g.edges.forEach((e, edgeIndex) => {
       if (e.width < MIN_ROAD_WIDTH || e.points.length < 2) return // 太窄的路、退化的边不建车道
       // 车道数 / 单车道宽 / 各车道相对中心线的偏移都由 roads.js 统一算，保证和画出来的标线一致
-      const { n, laneW, offsets } = laneLayout(e.width, !!e.oneway, e.median || 0)
+      const { n, laneW, offsets } = laneLayout(e.width, !!e.oneway, e.median || 0, e.laneCount || 0)
       const pair = []
       // 单行路只建 oneway 指定的那个方向（1 = a→b，-1 = b→a）；双向路两个方向各建一个 way
       for (const dir of e.oneway ? [e.oneway] : [1, -1]) {
@@ -511,7 +511,12 @@ export class Traffic {
    */
   #plan(way) {
     // 下一条路: 从终点路口的出路里随机挑一条，不掉头（排除 twin）；路口是图边界（没有出路）就出图
-    const opts = this.nodes[way.to].out.filter((w) => w !== way.twin)
+    let opts = this.nodes[way.to].out.filter((w) => w !== way.twin)
+    // 编辑器给路口设了「禁止左转」: 去掉左转的出路；只剩左转能走（丁字路口的尽头）时仍然放行，免得车卡死
+    if (this.nodes[way.to].noLeft) {
+      const ok = opts.filter((w) => this.#moveOf(way, w) !== 'L')
+      if (ok.length) opts = ok
+    }
     const nextWay = opts.length ? opts[(this.rand() * opts.length) | 0] : null
     const move = this.#moveOf(way, nextWay)
     const n = way.n

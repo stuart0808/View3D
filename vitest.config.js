@@ -4,7 +4,7 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
-    include: ['tests/**/*.test.js'],
+    include: ['tests/**/*.test.js', 'editor/tests/**/*.test.js'], // 场景编辑器的测试在它自己的目录里
     // three 是 ESM 包，vitest 默认能处理；这里只是把超时放宽一点，导航网格的距离场测试要算几十万格
     testTimeout: 20000,
   },

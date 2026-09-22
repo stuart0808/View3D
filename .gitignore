@@ -8,3 +8,9 @@ __pycache__
 
 # 样例图都可以重新生成（make_demo_map.py），卫星样例图有第三方版权，不进仓库
 tools/samples/
+
+# 前端导入的卫星图场景（本机数据）
+public/scenes/imported/
+# 训练出的屋顶分割网络权重
+tools/roofnet.pt
+data/survey/

@@ -76,6 +76,18 @@ DEFAULT_MARKERS = [
 # ----------------------------------------------------------------------------
 # 基础工具
 # ----------------------------------------------------------------------------
+def remove_by_id(lst, item):
+    """
+    按对象身份从列表里删掉 item。不能用 list.remove: 它拿 == 挨个比，元素里有 numpy 数组时（边的端点、折线），
+    只要排在前面的某个元素其他字段恰好相等，比到数组就会抛「truth value of an array is ambiguous」
+    """
+    for i, x in enumerate(lst):
+        if x is item:
+            del lst[i]
+            return
+    raise ValueError("不在列表里")
+
+
 def log(*a):
     """进度信息走 stderr，stdout 留给可能的管道输出；每行带 [map2scene] 前缀便于在 npm 脚本输出里辨认"""
     print("[map2scene]", *a, file=sys.stderr)
@@ -295,7 +307,7 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
                         continue
                     if all(e["L"] < jog_tol * 1.5 for e in mids) and sum(e["L"] for e in mids) < jog_tol * 3:  # 每条都短、总长也短
                         for e in mids:
-                            es.remove(e)
+                            remove_by_id(es, e)
                         changed = True
                         break
                 if changed:
@@ -315,7 +327,7 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
                     e["c"] = (e["c"] * e["L"] + q["c"] * q["L"]) / tot  # 位置按长度加权，长边说了算
                     e["L"] = tot
                     e["b"] = q["b"]
-                    es.remove(q)
+                    remove_by_id(es, q)
                 else:
                     j = e["b"]  # 连接边放在 e 的末端处，长度 = 两条边的错位量
                     t = "V" if e["t"] == "H" else "H"
@@ -575,7 +587,7 @@ def prune_and_merge(nodes, edges, dt):
                  and poly_len(e[2]) < 1.2 * max_width_of(e[2])]
         if spurs:
             for e in spurs:
-                edges.remove(e)
+                remove_by_id(edges, e)
             continue
         # 拼接度为 2 的节点
         # 剪掉毛刺后留下的「假路口」只连两条边，把两条折线首尾接起来成一条；每次只拼一个然后重算度数
@@ -594,8 +606,8 @@ def prune_and_merge(nodes, edges, dt):
             a = e1[0] if e1[1] == n else e1[1]
             p2 = e2[2] if e2[0] == n else e2[2][::-1]
             b = e2[1] if e2[0] == n else e2[0]
-            edges.remove(e1)
-            edges.remove(e2)
+            remove_by_id(edges, e1)
+            remove_by_id(edges, e2)
             edges.append([a, b, np.vstack([p1, p2[1:]])])  # p2[0] 就是 n，和 p1[-1] 重复，去掉
             merged = True
             break
@@ -612,7 +624,7 @@ def prune_and_merge(nodes, edges, dt):
         if short is None:
             break  # 三种整理都无事可做，收工
         a, b, _ = short
-        edges.remove(short)
+        remove_by_id(edges, short)
         # 合并后的位置取两者里「更靠路中心」的那个（距离变换值大的）。取中点会让节点偏离宽路的中心线，
         # 而车道是按「到节点的距离」截短的，一偏支路车道就伸进主干路里去了
         def dt_at(n_):
@@ -683,6 +695,84 @@ def cut_polyline(pts, s0, s1):
 # ----------------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------------
+def match_drawn_road(pts, roads, pad):
+    """
+    骨架提取出的一条道路边，对应编辑器里画的哪条路（取车道数、单行方向用）
+
+    标记图上的路只是一片蓝色，骨架化以后得到的边和用户画的折线不是一一对应的（路口会把一条画线切成几段，
+    画线之间的连接处也可能多出短边），所以按「几何重合」匹配: 在边上均匀取最多 15 个点，
+    落在某条画线「半宽 + pad」范围内的比例 ≥ 60% 就算这条路。
+
+    Args:
+        pts: 边的像素路径 (N, 2)，x, y
+        roads: [{"points": (M, 2) 像素折线（按行驶方向画）, "width_px", "lanes" 每方向车道数, "oneway"}]
+        pad: 额外容差（像素），骨架会偏离画线中心一点，路口附近更明显
+    Returns:
+        (lanes, dir): lanes = 每方向车道数（0 = 没匹配 / 没指定，前端按路宽推）；
+                      dir = +1 单行且沿边的点序行驶，-1 单行且逆点序，0 双向
+    """
+    pts = np.asarray(pts, np.float64)
+    if not roads or len(pts) < 2:
+        return 0, 0
+    idx = np.linspace(0, len(pts) - 1, min(len(pts), 15)).round().astype(int)  # 均匀取样
+    S = pts[idx]
+    T = np.gradient(S, axis=0)  # 每个采样点处边的走向
+    best = (0.0, None, None)  # (重合比例, 画线, 每个采样点最近画线段的方向)
+    for r in roads:
+        P = np.asarray(r["points"], np.float64)
+        if len(P) < 2:
+            continue
+        A, D = P[:-1], P[1:] - P[:-1]  # 画线的各段: 起点、方向向量
+        L2 = np.maximum((D ** 2).sum(1), 1e-9)
+        # 每个采样点到每一段的投影参数 t（截到 [0, 1]）和最近点 → 距离矩阵 (采样点, 段)
+        t = np.clip(((S[:, None, :] - A[None]) * D[None]).sum(2) / L2[None], 0, 1)
+        Q = A[None] + t[..., None] * D[None]
+        d = np.hypot(S[:, None, 0] - Q[..., 0], S[:, None, 1] - Q[..., 1])
+        frac = float((d.min(1) <= r.get("width_px", 0) / 2 + pad).mean())  # 落在路面范围内的采样点比例
+        if frac > best[0]:
+            best = (frac, r, D[d.argmin(1)])
+    frac, r, dirs = best
+    if frac < 0.6:
+        return 0, 0  # 没有哪条画线和它重合: 可能是画线之间的连接短边，按路宽推车道
+    lanes = int(r.get("lanes") or 0)
+    if not r.get("oneway"):
+        return lanes, 0
+    # 单行: 边的走向和画线方向点积之和的符号 = 沿点序还是逆点序行驶
+    return lanes, (1 if float((T * dirs).sum()) >= 0 else -1)
+
+
+def apply_junctions(nodes, junctions, reach=12.0):
+    """
+    场景编辑器的路口设置 → roadGraph 节点属性（就地修改 nodes）
+
+    编辑器里的路口是用户点的一个位置，生成前还不知道路网会被骨架化成哪些节点，所以按距离对:
+    每条设置找「度 ≥ 3、离得最近、且在 路口半径 + reach 米以内」的节点。
+    Args:
+        nodes: roadGraph["nodes"]，{id: {pos, radius, degree, ...}}，坐标米
+        junctions: [{pos: [x, y] 米, control: "signal" | "none", green: [东西, 南北] 秒 | None, noLeft: 布尔}]
+    Returns:
+        对上的个数
+    """
+    hit = 0
+    for j in junctions:
+        best, bd = None, None
+        for n in nodes.values():
+            if n.get("degree", 0) < 3 or n.get("roundabout") or n.get("level"):
+                continue  # 只有平面交叉的路口才有灯 / 转向限制
+            d = math.hypot(n["pos"][0] - j["pos"][0], n["pos"][1] - j["pos"][1])
+            if d <= n.get("radius", 0) + reach and (bd is None or d < bd):
+                best, bd = n, d
+        if best is None:
+            continue
+        hit += 1
+        best["control"] = "none" if j.get("control") == "none" else "signal"
+        if j.get("green") and best["control"] == "signal":
+            best["signal"] = {"green": [float(j["green"][0]), float(j["green"][1])]}
+        if j.get("noLeft"):
+            best["noLeft"] = True
+    return hit
+
+
 def geom_to_json(g, nd=2):
     """
     shapely 几何 → [{polygon, holes}]（多部件拆开，面积 < 1㎡ 的丢掉），坐标保留 nd 位小数。
@@ -809,6 +899,20 @@ def main():
                 continue
             hs = [h for h in (simplify_ring(h, max(1.0, args.simplify_m / mpp)) for h in holes) if h is not None]
             raw.append((markers[i], to_m(s), [to_m(h) for h in hs]))
+    # sidecar 里直接给出的单栋轮廓（autoscene 用）: 挨在一起的房子在按类别涂色的标记图上会连成一块，
+    # 被当成一栋；直接给轮廓就能保住「一栋一栋」。轮廓是像素坐标，kind / floors 跟着走
+    side_early = json.loads(Path(args.sidecar).read_text("utf-8")) if args.sidecar else {}
+    for fp in side_early.get("footprints", []):
+        ring = np.asarray(fp["poly"], np.float64)
+        if len(ring) < 3:
+            continue
+        cv2.fillPoly(bmask_all, [np.round(ring).astype(np.int32).reshape(-1, 1, 2)], 255)  # 也要从道路 / 铺装里扣掉
+        mk = {"kind": fp.get("kind", "residential"), "floors": fp.get("floors") or 2, "fixed_floors": bool(fp.get("floors")),
+              # 场景编辑器改已有场景时带上原来的楼编号和属性: 编号不变，实地标注等按编号挂的数据才对得上
+              "id": fp.get("id"), "attrs": fp.get("attrs") or {}}
+        raw.append((mk, to_m(ring), []))
+    if side_early.get("footprints"):
+        log(f"sidecar 单栋轮廓: {len(side_early['footprints'])} 栋")
     if not raw:
         log("警告: 没有识别到任何建筑色块（检查标记颜色，或调大 --tol）")
 
@@ -818,6 +922,24 @@ def main():
 
     # 每栋楼: 自己的主方向（接近全局主方向就直接用全局的）→ 直角化 → 层数（写字楼按占地面积 6~28 层，住宅 9~18 层）
     buildings = []
+    # 楼编号: sidecar 指定了就用（重复的只认第一个），其余从 b1 起顺序编、跳过已被占用的
+    given, used = set(), set()
+    for mk, _, _ in raw:
+        bid = mk.get("id")
+        if isinstance(bid, str) and bid and bid not in given:
+            given.add(bid)
+        else:
+            mk["id"] = None  # 重复 / 非法: 当成没指定
+    next_no = 1  # 下一个候选编号
+
+    def new_id():
+        """下一个没被指定编号占用的 b<n>"""
+        nonlocal next_no
+        while f"b{next_no}" in given or f"b{next_no}" in used:
+            next_no += 1
+        used.add(f"b{next_no}")
+        return f"b{next_no}"
+
     for k, (mk, shell, holes) in enumerate(raw):
         ang = dominant_angle([shell])
         if ang_diff90(ang, g_ang) < math.radians(7):  # 7° 以内的偏差视为手抖，统一到街区方向，整片楼才会齐
@@ -825,11 +947,15 @@ def main():
         kind = mk.get("kind", "shop")
         poly = ortho_building(shell, holes, ang, not args.no_ortho and kind != "venue")  # 场馆多是椭圆、异形，保持原样
         floors = mk.get("floors", 2)
-        if kind == "block":
+        if mk.get("fixed_floors"):
+            pass  # sidecar 轮廓自带层数（OSM / 影子估的 / 按面积给的），不再按类型随机
+        elif kind == "block":
             floors = int(min(28, 6 + poly.area // 260 + (k * 7) % 5))  # 每 260㎡ 占地加 1 层，再加按序号的伪随机抖动，封顶 28
         elif kind == "residential":
             floors = 9 + (k * 5) % 10  # 9~18 层，按序号错开，避免一排楼一样高
-        buildings.append(dict(id=f"b{k + 1}", kind=kind, floors=floors, angle=ang, geom=poly))
+        # attrs: 编辑器带过来的属性（场馆信息、实地标注写回的商户清单和吸引力、名称），原样写进场景
+        attrs = {a: mk["attrs"][a] for a in ("venue", "attraction", "shops", "name") if a in mk.get("attrs", {})}
+        buildings.append(dict(id=mk.get("id") or new_id(), kind=kind, floors=floors, angle=ang, geom=poly, **attrs))
     b_union = unary_union([b["geom"] for b in buildings]) if buildings else Polygon()  # 米制建筑并集，后面区域 / 可走范围要减掉它
 
     # ---------------- 道路 / 地块 / 人行铺装 ----------------
@@ -959,8 +1085,10 @@ def main():
 
     # ---------------- 道路中心线 / 斑马线 ----------------
     # road_graph 是前端车流的骨干数据:
-    #   nodes[id] = {pos 米, radius 路口半径（到路边距离）米, degree 度, roundabout?, level?}
-    #   edges[]   = {a, b 节点 id, width 路宽米, points 中心线米, ext [两端路口深度], oneway?, roundabout?, median?, level?}
+    #   nodes[id] = {pos 米, radius 路口半径（到路边距离）米, degree 度, roundabout?, level?,
+    #                control? / signal? / noLeft? 编辑器的路口设置（无灯、绿灯时长、禁止左转）}
+    #   edges[]   = {a, b 节点 id, width 路宽米, points 中心线米, ext [两端路口深度], oneway?, roundabout?, median?, level?,
+    #                laneCount? 编辑器指定的每方向车道数}
     # lanes 是给渲染用的车道线（已截掉路口和斑马线），crosswalks 是斑马线；三者坐标都是米
     lanes, crosswalks = [], []
     road_graph = {"nodes": {}, "edges": []}
@@ -1049,6 +1177,9 @@ def main():
         # 路口沿某条路方向的范围 = 与它相交（不共线）的那些路的半宽，而不是它自己的半宽。
         # 窄支路接宽主干路时差别很大: 按自己路宽算，斑马线会画到主干路（甚至高架桥面）底下去。
         edge_w = [width_of(e[2]) * mpp for e in edges]  # 每条边的路宽（米），按 edges 下标索引
+        # 编辑器画的路（sidecar roads，像素坐标）: 按几何重合找到对应的边，拿到车道数和单行方向
+        drawn = [dict(r, width_px=float(r.get("width_m", 0)) / mpp) for r in side_early.get("roads", [])]
+        drawn_of = [match_drawn_road(e[2], drawn, max(3.0, 2.0 / mpp)) for e in edges]  # 每条边: (车道数, 单行方向)
 
         def arm_dir(pts, at_start):
             """这条边从某端出发的方向（取前 20 个点）"""
@@ -1096,7 +1227,9 @@ def main():
                 ring_nodes.update((a, b))
         for ei, (a, b, pts) in enumerate(edges):
             w_m = edge_w[ei]
-            oneway = ring_of(pts)  # 0 = 双向普通路；±1 = 环道及其行驶方向
+            ring = ring_of(pts)  # 0 = 不是环道；±1 = 环道及其行驶方向
+            lane_n, d_dir = drawn_of[ei]  # 编辑器指定的每方向车道数（0 = 按路宽推）、单行方向
+            oneway = ring or d_dir  # 0 = 双向；±1 = 单行（环道或编辑器画的单行路），沿 / 逆点序
             median = under_deck(pts)  # 桥面半宽（米），0 = 不在桥下
             # 像素路径每个像素一个点，太密；按 0.8m（至少 1.5px）容差简化成折线，closed=False
             sp = cv2.approxPolyDP(pts.astype(np.float32).reshape(-1, 1, 2), max(1.5, 0.8 / mpp), False).reshape(-1, 2).astype(np.float64)
@@ -1108,10 +1241,11 @@ def main():
                 road_graph["nodes"][str(nid)] = {"pos": [round(float(v), 2) for v in to_m([nx_, ny_])], "radius": round(rad, 2), "degree": int(deg.get(nid, 0)),
                                                  **({"roundabout": True} if nid in ring_nodes else {})}
             road_graph["edges"].append({"a": str(a), "b": str(b), "width": round(w_m, 2), "points": [[round(float(x), 2), round(float(y), 2)] for x, y in pm],
-                                        **({"oneway": oneway, "roundabout": True} if oneway else {}), **({"median": median} if median else {}),
+                                        **({"oneway": oneway} if oneway else {}), **({"roundabout": True} if ring else {}),
+                                        **({"median": median} if median else {}), **({"laneCount": lane_n} if lane_n else {}),
                                         # ext: 路口沿这条路方向伸进来多深（两端各一个），车道据此截短；比用路口半径准，宽路接窄路时差很多
                                         "ext": [round(box_extent(a, ei), 2) if deg.get(a, 0) >= 3 else 0, round(box_extent(b, ei), 2) if deg.get(b, 0) >= 3 else 0]})
-            if oneway:  # 环道: 不设斑马线，只画车道分隔线（点序调成行驶方向，前端按「行驶方向右侧」算偏移）
+            if ring:  # 环道: 不设斑马线，只画车道分隔线（点序调成行驶方向，前端按「行驶方向右侧」算偏移）
                 if total > 8:
                     piece = cut_polyline(pm, 3.0, total - 3.0)
                     lanes.append(dict(points=piece if oneway == 1 else piece[::-1], width=w_m, oneway=True))
@@ -1157,8 +1291,12 @@ def main():
             cuts = [trim[0]] + [v for s in mids for v in (s - CW_DEPTH / 2 - 1, s + CW_DEPTH / 2 + 1)] + [total - trim[1]]
             for j in range(0, len(cuts), 2):
                 if cuts[j + 1] - cuts[j] > 5:  # 5m 以下的碎段不画
-                    lanes.append(dict(points=cut_polyline(pm, cuts[j], cuts[j + 1]), width=w_m, median=median))
+                    piece = cut_polyline(pm, cuts[j], cuts[j + 1])
+                    # 编辑器画的单行路: 点序调成行驶方向；laneCount 让前端按指定车道数排车道
+                    lanes.append(dict(points=piece if oneway >= 0 else piece[::-1], width=w_m, median=median, oneway=bool(oneway), laneCount=lane_n))
         log(f"道路中心线 {len(lanes)} 段, 斑马线 {len(crosswalks)} 处")
+        # 编辑器的路口设置（sidecar junctions，像素坐标）: 对到最近的路口节点上，写进节点给前端的信号灯 / 车流用
+        apply_junctions(road_graph["nodes"], [dict(j, pos=to_m(j["pos"]).tolist()) for j in side_early.get("junctions", [])])
 
     # ---------------- 高架 ----------------
     # 桥面多边形 + 自己的骨架图（节点 id 加 e 前缀，level=1）；不和地面路网相连，上下桥的匝道由前端按需生成
@@ -1208,6 +1346,37 @@ def main():
             pt = Point(*to_m(v["at"]))
             best_b = min(cands, key=lambda b: b["geom"].distance(pt))
             best_b["venue"] = {k_: v[k_] for k_ in ("name", "type", "capacity") if k_ in v}
+    # 逐栋楼的层数（sat2marks 用影子估出来的，或者用户手填的）: at 点落在哪栋楼里（容差 3m）就改那栋。
+    # 几个点落进同一栋（挨着的楼在标记图上连成了一块）时取最高的，免得一栋高楼被旁边的矮楼拉低
+    got_floors = {}  # 楼 id → 层数
+    for a in side.get("buildings", []):  # 每条记录: {at: [x, y] 像素, floors}
+        if not a.get("floors"):
+            continue  # 没有层数的记录跳过
+        pt = Point(*to_m(a["at"]))  # 像素 → 米
+        hit = [b for b in buildings if b["geom"].distance(pt) <= 3.0]  # 点在楼里或 3m 内（轮廓直角化后边缘会挪一点）
+        if hit:
+            b = min(hit, key=lambda b_: b_["geom"].distance(pt))  # 离得最近的那栋（在楼里时距离为 0）
+            got_floors[b["id"]] = max(got_floors.get(b["id"], 0), int(max(1, round(a["floors"]))))
+    for b in buildings:  # 写回
+        if b["id"] in got_floors:
+            b["floors"] = got_floors[b["id"]]
+    if side.get("buildings"):
+        log(f"sidecar 层数: {len(got_floors)} 栋楼（共 {len(side['buildings'])} 条记录）")
+    # 细长比上限: 楼高不超过最窄边的 8 倍（真实高层住宅的高宽比很少超过 6~7）。
+    # 防的是识别出来的碎片 / 窄条被给了很高的层数，变成一根铅笔立在那里；层高按 3m 算
+    capped = 0  # 被压低的栋数，写日志
+    for b in buildings:
+        if b["kind"] not in ("block", "residential"):
+            continue  # 商铺本来就低、场馆是异形，不管
+        rr = b["geom"].minimum_rotated_rectangle  # 最小外接矩形
+        xs_, ys_ = rr.exterior.coords.xy  # 四个角（首尾重复）
+        short = min(math.hypot(xs_[1] - xs_[0], ys_[1] - ys_[0]), math.hypot(xs_[2] - xs_[1], ys_[2] - ys_[1]))  # 最小外接矩形的短边（米）
+        lim = max(2, int(8 * short / 3.0))  # 层数上限，至少 2 层
+        if b["floors"] > lim:
+            b["floors"] = lim
+            capped += 1
+    if capped:
+        log(f"细长比上限: {capped} 栋楼的层数被压低（楼高 ≤ 8 × 最窄边）")
     # 轨道交通: 线路折线 + 车站，原样透传（只换坐标单位），前端自己画轨道 / 跑车
     transit = None
     if side.get("transit"):
@@ -1337,8 +1506,9 @@ def main():
         "site": geom_to_json(site),
         "pavement": geom_to_json(pavement),
         "buildings": [
-            {"id": b["id"], "kind": b["kind"], "floors": b["floors"], "angle": round(b["angle"], 5), "attraction": 1.0,
+            {"id": b["id"], "kind": b["kind"], "floors": b["floors"], "angle": round(b["angle"], 5), "attraction": b.get("attraction", 1.0),
              **({"venue": b["venue"]} if b.get("venue") else {}),
+             **({"name": b["name"]} if b.get("name") else {}), **({"shops": b["shops"]} if b.get("shops") else {}),
              **geom_to_json(b["geom"])[0]}
             for b in buildings if geom_to_json(b["geom"])
         ],
@@ -1347,7 +1517,8 @@ def main():
         "elevated": geom_to_json(elevated),
         "lanes": [{"points": [r2(p) for p in l["points"]], "width": round(l["width"], 2),
                    **({"oneway": True} if l.get("oneway") else {}), **({"level": 1} if l.get("level") else {}),
-                   **({"median": l["median"]} if l.get("median") else {})} for l in lanes],
+                   **({"median": l["median"]} if l.get("median") else {}),
+                   **({"laneCount": l["laneCount"]} if l.get("laneCount") else {})} for l in lanes],
         "crosswalks": [{"center": r2(c["center"]), "dir": [round(float(c["dir"][0]), 4), round(float(c["dir"][1]), 4)],
                         "span": round(c["span"], 2), "depth": c["depth"], "node": c.get("node"), "edge": c.get("edge")} for c in crosswalks],
         "doors": [{"building": d["building"], "pos": r2(d["pos"]), "normal": [round(float(d["normal"][0]), 4), round(float(d["normal"][1]), 4)]} for d in doors],

@@ -2,7 +2,7 @@
 // 验证: 各类楼都能建出网格、每个顶点 / 实例带建筑编号、楼高按层数 × 层高、原型确定性、隐藏补丁。
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
-import { buildBuildings, hideable, hiddenBuilding, FLOOR_H } from '../src/city/buildings.js'
+import { buildBuildings, hideable, hiddenBuilding, FLOOR_H, cornerFor } from '../src/city/buildings.js'
 import { makeRandom } from '../src/city/geometry.js'
 
 const rect = (x, y, w, h) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
@@ -84,5 +84,13 @@ describe('hideable', () => {
     expect(shader.uniforms.hiddenBid).toBe(hiddenBuilding)
     expect(shader.vertexShader).toContain('attribute float bid')
     expect(shader.vertexShader).toContain('abs(bid - hiddenBid) < 0.5')
+  })
+})
+
+describe('cornerFor', () => {
+  it('小房子圆角小（最窄处的 12%），大楼封顶 1.6m，再小也有 0.25m', () => {
+    expect(cornerFor(rect(0, 0, 8, 9))).toBeCloseTo(0.96) // 8m 宽的民房
+    expect(cornerFor(rect(0, 0, 40, 60))).toBeCloseTo(1.6)
+    expect(cornerFor(rect(0, 0, 1, 1))).toBeCloseTo(0.25)
   })
 })

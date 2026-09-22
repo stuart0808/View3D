@@ -38,10 +38,12 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
   }
   if (slabs.length) {
     const slab = new THREE.Mesh(mergeGeometries(slabs), std(style.slab))
+    slab.name = 'slab'
     slab.castShadow = true // 底座的侧面投影到下面的阴影平面上，街区才像「浮」着
     slab.receiveShadow = true
     group.add(slab)
     const road = new THREE.Mesh(mergeGeometries(roadTops), std(style.road))
+    road.name = 'roadSurface' // 卫星底图打开时和铺装 / 区域 / 标线一起隐藏（见 CityEngine.setImagery）
     road.receiveShadow = true // 楼和树的影子落在路上
     group.add(road)
   }
@@ -53,6 +55,7 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
     const mat = std(style.pavement, 0.9)
     mat.map = tileTexture(scene.angle || 0) // 分缝贴图按世界坐标平铺（ExtrudeGeometry 的 uv 就是 xy），跟随街区方向
     const pave = new THREE.Mesh(mergeGeometries(paves), mat)
+    pave.name = 'pavement'
     pave.receiveShadow = true
     group.add(pave)
   }
@@ -152,7 +155,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
   }
   for (const lane of scene.lanes || []) { // 每条路（一条 lane 记录 = 一条路的中心线 + 路宽）
     const y = 0.025 + (lane.level ? ELEVATED_H : 0) // 标线浮在路面上方 2.5cm，高架的抬到桥面
-    const { n, laneW, offsets } = laneLayout(lane.width, !!lane.oneway, lane.median || 0) // 单向车道数、车道宽、各车道中心偏移
+    const { n, laneW, offsets } = laneLayout(lane.width, !!lane.oneway, lane.median || 0, lane.laneCount || 0) // 单向车道数、车道宽、各车道中心偏移
     if (lane.median) {
       // 桥下的路: 中间是一整条桥下隔离带（另建），两侧车道之间白虚线，最内侧画一条白实线当边线
       underDeck.push(lane)
@@ -166,7 +169,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
       for (let k = 1; k < n; k++) stroke(lane.points, offsets[k] - laneW / 2, 0.18, style.marking, true, y)
       continue
     }
-    if (hasMedian(lane.width)) medians.push(lane) // 单向 ≥3 车道: 实体中央隔离带，下面另建
+    if (hasMedian(lane.width, !!lane.oneway, lane.laneCount || 0)) medians.push(lane) // 单向 ≥3 车道: 实体中央隔离带，下面另建
     else if (n >= 2) { stroke(lane.points, 0.2, 0.16, style.centerLine, false, y); stroke(lane.points, -0.2, 0.16, style.centerLine, false, y) } // 双黄实线，间距 40cm
     else stroke(lane.points, 0, 0.2, style.centerLine, true, y) // 单车道: 黄虚线（可借道超车）
     for (let k = 1; k < n; k++) for (const sgn of [1, -1]) stroke(lane.points, sgn * k * laneW, 0.18, style.marking, true, y) // 同向车道之间的白虚线，两侧对称

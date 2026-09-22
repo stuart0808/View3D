@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-统计注释率: 注释行 / 非空行。JS 认 //、/* */、* 开头的行和行尾 //；Python 认 #、三引号文档字符串。
+统计注释率: 注释行 / 非空行。JS 认 //、/* */、* 开头的行和行尾 //，.vue 模板再认 <!-- -->；Python 认 #、三引号文档字符串。
     python tools/comment_ratio.py src/city tools tests
 """
 import re  # 识别引号里的 // 和 #
@@ -33,11 +33,16 @@ def ratio(path):
                 if "#" in s and not re.search(r"['\"].*#.*['\"]", s):  # 行尾 #；引号里的（如颜色 '#FF0000'）不算
                     comment += 1  # 行尾注释也算一行注释（同一行既是代码也是注释）
             continue
-        if in_block:  # JS 块注释内部
+        if in_block:  # JS 块注释 / HTML 注释内部
             comment += 1
-            if "*/" in s:
+            if "*/" in s or "-->" in s:
                 in_block = False
             continue
+        if s.startswith("<!--"):  # .vue 模板里的 HTML 注释
+            comment += 1
+            if "-->" not in s:
+                in_block = True  # 多行 HTML 注释，直到 --> 为止
+            continue  # 这一行不再按 JS 规则判断
         if s.startswith("/*"):  # 块注释开头（含 /** JSDoc）
             comment += 1
             if "*/" not in s:

@@ -53,6 +53,9 @@
     <button class="tool" data-tool="portal">出入口点<kbd>O</kbd></button>
     <button class="tool" data-tool="ruler">标尺（校准比例）<kbd>R</kbd></button>
     <div class="row" id="rulerRow" style="display:none"><span>实际</span><input id="rulerM" type="number" min="1" step="0.1" placeholder="米" /><button id="rulerOk">设定</button></div>
+    <button class="tool" data-tool="cand">建筑候选<kbd>C</kbd></button>
+    <button class="tool" data-tool="calib">倾斜 / 影子校准<kbd>K</kbd></button>
+    <button class="tool" data-tool="floors">层数<kbd>H</kbd></button>
 
     <h3>选项</h3>
     <label class="chk"><input id="instant" type="checkbox" /> 点选后立即确认</label>
@@ -60,19 +63,36 @@
     <div class="row" id="tolRow"><span>容差</span><input id="tol" type="range" min="3" max="40" value="10" /><span id="tolv">10</span></div>
     <div class="row"><span>标记透明度</span><input id="alpha" type="range" min="0" max="1" step="0.05" value="0.55" /></div>
 
+    <h3>比例尺</h3>
+    <div class="row"><span>纬度</span><input id="lat" type="number" step="0.01" value="31.2" /><span>级别</span><input id="zoom" type="number" step="0.5" value="18" style="width:52px" /></div>
+    <div class="row"><label class="chk" style="margin:0"><input id="hidpi" type="checkbox" /> 高分屏截图</label><button id="zoomOk" style="margin-left:auto">设定</button></div>
+
     <h3>自动</h3>
+    <div class="row"><button id="autoBld" style="flex:1">自动找建筑</button></div>
+    <div class="row"><button id="candAll" style="flex:1">全部接受</button><button id="candNone" style="flex:1">全部丢弃</button></div>
+    <p class="hint" id="candHint">候选工具: 左键接受（按当前类别），右键丢弃</p>
     <div class="row"><button id="autoVeg" style="flex:1">自动提取植被</button></div>
     <div class="row"><span>阈值</span><input id="vegThr" type="range" min="0.02" max="0.2" step="0.01" value="0.06" /><span id="vegThrv">0.06</span></div>
     <div class="row"><button id="clearCls" style="flex:1">清空当前类别</button></div>
+    <p class="hint" id="jobMsg"></p>
+
+    <h3>楼高</h3>
+    <p class="hint">校准: 选一栋看得清的楼，依次点 墙脚角 → 正上方的屋顶角 → 那个屋顶角的影子尖（没影子就点两下后按 Enter），再填它的层数</p>
+    <div class="row"><span>层数</span><input id="calFloors" type="number" min="1" step="1" /><span>层高</span><input id="floorH" type="number" min="2" step="0.1" value="3" style="width:52px" /></div>
+    <div class="row"><button id="calOk" style="flex:1">设定校准</button><button id="heights" style="flex:1">估算楼高</button></div>
+    <div class="row"><span>点楼设为</span><input id="setFloors" type="number" min="0" step="1" value="18" /><span class="hint" style="margin:0">层（0 = 清除）</span></div>
+    <label class="chk"><input id="showFloors" type="checkbox" checked /> 显示层数</label>
+    <label class="chk"><input id="showFeet" type="checkbox" /> 预览墙脚（校正后）</label>
 
     <h3>输出</h3>
     <div class="row"><button id="undo" style="flex:1">撤销 <kbd style="color:var(--dim)">Ctrl+Z</kbd></button></div>
     <div class="row"><button id="save" style="flex:1">保存标记图</button></div>
     <div class="row"><span>场景名</span><input id="sceneName" type="text" style="flex:1" /></div>
     <label class="chk"><input id="siteFull" type="checkbox" /> 整张图都算地块</label>
+    <label class="chk"><input id="correct" type="checkbox" checked /> 倾斜校正（屋顶 → 墙脚）</label>
     <div class="row"><button id="makeScene" style="flex:1; background:#2b5fb8; border-color:#2b5fb8; color:#fff">生成场景 →</button></div>
 
-    <p class="hint">滚轮缩放 · 空格/中键拖动平移<br>点选: 左键加点，右键减点，Enter 确认，Esc 取消<br>多边形/线: 单击加点，Enter 或双击结束，Backspace 退一点</p>
+    <p class="hint">滚轮缩放 · 空格/中键拖动平移<br>点选: 左键加点，右键减点，Enter 确认，Esc 取消<br>多边形/线: 单击加点，Enter 或双击结束，Backspace 退一点<br>候选: 左键接受，右键丢弃 · 层数: 点楼</p>
   </div>
   <div id="wrap"><canvas id="cv"></canvas>
     <div id="log"><div class="row" style="justify-content:space-between"><b>生成结果</b><button id="logClose">关闭</button></div><div id="logBody"></div></div>
@@ -89,6 +109,8 @@ const prevCv = document.createElement('canvas'), prevCtx = prevCv.getContext('2d
 let view = { x: 0, y: 0, s: 1 }
 let tool = 'sam', cls = 1
 let samPts = [], shapePts = [], rulerPts = [], hasPreview = false
+let cands = [], feet = [], calPts = [] // 建筑候选轮廓 / 校正后墙脚轮廓（预览）/ 正在点的校准点
+let jobTimer = 0
 let mouse = { x: 0, y: 0 }, panning = null, spaceDown = false, busyCount = 0
 
 const api = async (path, body) => {
@@ -126,7 +148,53 @@ async function init() {
   await img.decode()
   for (const c of [labelCv, prevCv]) { c.width = state.width; c.height = state.height }
   await reloadLabels()
+  if (state.calib) $('#calFloors').value = state.calib.floors
+  $('#floorH').value = state.floorH
+  await loadCands() // 上次算过的候选（有缓存）直接显示
   resize(); fit(); setCls(1); setTool('sam')
+}
+
+// ---------------- 候选 / 楼高 / 后台任务 ----------------
+async function loadCands() { const j = await api('/cands'); cands = j.cands || []; draw() }
+async function loadFeet() { feet = $('#showFeet').checked ? ((await api('/footprints')).feet || []) : []; draw() }
+async function reloadState() { const st = await api('/state'); state.floors = st.floors; state.calib = st.calib; draw() }
+
+/** 轮询后台任务，结束后调 onDone；进度显示在侧栏 */
+function pollJob(onDone) {
+  clearInterval(jobTimer)
+  jobTimer = setInterval(async () => {
+    const j = await api('/job')
+    const el = $('#jobMsg')
+    if (j.running) { el.textContent = `${j.name}… ${j.total ? j.done + '/' + j.total : ''} ${j.msg}`; el.className = 'hint'; return }
+    clearInterval(jobTimer)
+    el.textContent = j.error ? `${j.name}失败: ${j.error}` : `${j.name}: ${j.msg}`
+    el.className = j.error ? 'hint err' : 'hint'
+    if (!j.error) await onDone()
+  }, 800)
+}
+
+/** 射线法: 点是否在多边形里（候选点击命中用） */
+function inPoly(x, y, poly) {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j]
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
+}
+const isBuildingCls = (c) => state.buildingIds.includes(c)
+
+async function candClick(x, y, accept) {
+  const c = cands.find((k) => inPoly(x, y, k.poly))
+  if (!c) return msg('这里没有候选')
+  if (accept) {
+    if (!isBuildingCls(cls)) return msg('先在左边选一个建筑类别（商铺 / 高楼 / 住宅 / 场馆）', true)
+    const j = await api('/cand_accept', { ids: [c.id], cls, protect: $('#protect').checked })
+    if (j.patch) await applyPatch(j.patch)
+  } else await api('/cand_reject', { ids: [c.id] })
+  cands = cands.filter((k) => k !== c)
+  msg(`还剩 ${cands.length} 个候选`)
+  draw()
 }
 
 async function reloadLabels() {
@@ -152,7 +220,7 @@ function setTool(t) {
   $('#rulerRow').style.display = t === 'ruler' ? 'flex' : 'none'
   cv.style.cursor = 'crosshair'
 }
-function cancel() { samPts = []; shapePts = []; rulerPts = []; clearPreview(); draw() }
+function cancel() { samPts = []; shapePts = []; rulerPts = []; calPts = []; clearPreview(); draw() }
 function clearPreview() { hasPreview = false; prevCtx.clearRect(0, 0, prevCv.width, prevCv.height) }
 
 function resize() {
@@ -196,6 +264,28 @@ function draw() {
     ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#fff'; ctx.stroke()
     for (const [x, y] of shapePts) { ctx.fillStyle = '#fff'; ctx.fillRect(x - 2.5 * px, y - 2.5 * px, 5 * px, 5 * px) }
   }
+  // 建筑候选: 黄色虚线轮廓 + 很淡的填充
+  if (cands.length) {
+    ctx.setLineDash([4 * px, 3 * px]); ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#ffd666'; ctx.fillStyle = 'rgba(255,214,102,0.14)'
+    for (const c of cands) { polyPath(c.poly); ctx.fill(); ctx.stroke() }
+    ctx.setLineDash([])
+  }
+  // 校正后的墙脚预览: 红色实线
+  if (feet.length) { ctx.lineWidth = 2 * px; ctx.strokeStyle = '#ff4d4f'; for (const f of feet) { polyPath(f.poly); ctx.stroke() } }
+  // 校准: 已设定的（实线）或正在点的（虚线）墙脚 → 屋顶 / 影子尖
+  const cp = calPts.length ? calPts : state.calib ? [state.calib.base, state.calib.roof, state.calib.tip].filter(Boolean) : []
+  if (cp.length) {
+    ctx.setLineDash(calPts.length ? [4 * px, 3 * px] : [])
+    ctx.lineWidth = 2 * px
+    for (const [k, col] of [[1, '#4f9cff'], [2, '#111']]) if (cp[k]) { ctx.beginPath(); ctx.moveTo(cp[0][0], cp[0][1]); ctx.lineTo(cp[k][0], cp[k][1]); ctx.strokeStyle = col; ctx.stroke() }
+    ctx.setLineDash([])
+    cp.forEach((q, k) => dot(q[0], q[1], ['#38d97a', '#4f9cff', '#111'][k], 5 * px, px))
+  }
+  // 层数: 手填白字，影子估的黄字
+  if ($('#showFloors').checked) {
+    ctx.font = `bold ${13 * px}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineWidth = 3 * px; ctx.strokeStyle = '#000'
+    for (const f of state.floors) { const t = f.floors + '层'; ctx.strokeText(t, f.x, f.y); ctx.fillStyle = f.src === 'manual' ? '#fff' : '#ffd666'; ctx.fillText(t, f.x, f.y) }
+  }
   for (const [x, y, l] of samPts) dot(x, y, l ? '#38d97a' : '#ff4d4f', 5 * px, px)
   for (const d0 of state.dots) dot(d0.x, d0.y, state.dotColors[d0.kind], 6 * px, px)
   if (rulerPts.length) {
@@ -204,6 +294,7 @@ function draw() {
     ctx.lineWidth = 2 * px; ctx.strokeStyle = '#ffc53d'; ctx.stroke()
   }
 }
+function polyPath(poly) { ctx.beginPath(); poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath() }
 function dot(x, y, fill, r, px) {
   ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = fill; ctx.fill()
   ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#000'; ctx.stroke()
@@ -224,7 +315,16 @@ cv.addEventListener('mousedown', (e) => {
   const [x, y] = toImg(cx, cy)
   if (x < 0 || y < 0 || x >= state.width || y >= state.height) return
   if (tool === 'sam') return samClick(x, y, e.button === 2 ? 0 : 1)
+  if (tool === 'cand') return candClick(x, y, e.button !== 2)
   if (e.button !== 0) return
+  if (tool === 'calib') {
+    calPts = calPts.length >= 3 ? [[x, y]] : [...calPts, [x, y]]
+    msg(['点对应的屋顶角', '点那个屋顶角的影子尖（没有影子就按 Enter）', '填层数后点「设定校准」'][calPts.length - 1])
+    return draw()
+  }
+  if (tool === 'floors') {
+    return api('/floors', { x, y, floors: +$('#setFloors').value || 0 }).then((j) => { if (j.floors) { state.floors = j.floors; loadFeet(); draw() } })
+  }
   if (tool === 'polygon' || tool === 'line') { shapePts.push([x, y]); if (e.detail >= 2) finishShape(); else draw(); return }
   if (tool === 'door' || tool === 'portal') return api('/dot', { kind: tool, x, y }).then((j) => { if (j.dots) { state.dots = j.dots; draw() } })
   if (tool === 'ruler') {
@@ -283,11 +383,11 @@ window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') return
   if (e.code === 'Space') { spaceDown = true; cv.style.cursor = 'grab'; e.preventDefault(); return }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); return undo() }
-  if (e.key === 'Enter') { e.preventDefault(); return tool === 'sam' ? commit() : finishShape() }
+  if (e.key === 'Enter') { e.preventDefault(); if (tool === 'calib') return setCalib(); return tool === 'sam' ? commit() : finishShape() }
   if (e.key === 'Escape') return cancel()
   if (e.key === 'Backspace') { if (shapePts.length) shapePts.pop(); else if (samPts.length) { samPts.pop(); samPts.length ? samClickRefresh() : cancel() } draw(); return }
   if (e.key === 'f' || e.key === 'F') return fit()
-  const t = { s: 'sam', p: 'polygon', l: 'line', d: 'door', o: 'portal', r: 'ruler' }[e.key.toLowerCase()]
+  const t = { s: 'sam', p: 'polygon', l: 'line', d: 'door', o: 'portal', r: 'ruler', c: 'cand', k: 'calib', h: 'floors' }[e.key.toLowerCase()]
   if (t) return setTool(t)
   if (/^[0-9]$/.test(e.key)) { const n = +e.key; if (n === 0) setCls(0); else if (state.classes[n - 1]) setCls(state.classes[n - 1].id) }
 })
@@ -311,10 +411,10 @@ $('#autoVeg').onclick = async () => {
   if (j.ok) { await reloadLabels(); msg(`植被: 绿化带 ${j.green_m2} ㎡，公园 ${j.park_m2} ㎡（不满意就 Ctrl+Z，调阈值重来）`) }
 }
 $('#clearCls').onclick = async () => { if (!cls) return; const j = await api('/clear_class', { cls }); if (j.ok) await reloadLabels() }
-$('#save').onclick = async () => { const j = await api('/export', {}); if (j.ok) msg('已保存 ' + j.marks) }
+$('#save').onclick = async () => { const j = await api('/export', { correct: $('#correct').checked }); if (j.ok) msg('已保存 ' + j.marks) }
 $('#makeScene').onclick = async () => {
   msg('生成中…')
-  const j = await api('/export', { scene: true, name: $('#sceneName').value.trim(), site: $('#siteFull').checked ? 'full' : 'auto' })
+  const j = await api('/export', { scene: true, name: $('#sceneName').value.trim(), site: $('#siteFull').checked ? 'full' : 'auto', correct: $('#correct').checked })
   if (!j.ok) return
   const ok = j.returncode === 0
   $('#logBody').innerHTML = `<pre>${(j.log || '').replace(/</g, '&lt;')}</pre>` +
@@ -324,6 +424,37 @@ $('#makeScene').onclick = async () => {
   msg(ok ? '场景已生成' : '转换失败', !ok)
 }
 $('#logClose').onclick = () => ($('#log').style.display = 'none')
+
+$('#zoomOk').onclick = async () => {
+  const j = await api('/mpp_zoom', { lat: +$('#lat').value, zoom: +$('#zoom').value, scale: $('#hidpi').checked ? 2 : 1 })
+  if (j.mpp) { state.mpp = j.mpp; $('#sMpp').textContent = j.mpp.toFixed(3) + ' m/px'; msg('比例已按缩放级别设定') }
+}
+$('#autoBld').onclick = async () => {
+  const j = await api('/auto_buildings', {})
+  if (j.started) { msg('自动找建筑: 后台运行中（CPU 上约每 1000×1000 像素半分钟）'); pollJob(async () => { await loadCands(); setTool('cand'); msg(`${cands.length} 个候选。左键接受（按当前类别），右键丢弃`) }) }
+}
+$('#candAll').onclick = async () => {
+  if (!cands.length) return
+  if (!isBuildingCls(cls)) return msg('先在左边选一个建筑类别', true)
+  const j = await api('/cand_accept', { ids: cands.map((c) => c.id), cls, protect: $('#protect').checked })
+  if (j.patch) await applyPatch(j.patch)
+  msg(`接受了 ${cands.length} 个候选（Ctrl+Z 可整体撤回）`); cands = []; draw()
+}
+$('#candNone').onclick = async () => { await api('/cand_reject', { ids: cands.map((c) => c.id) }); cands = []; draw() }
+async function setCalib() {
+  const f = +$('#calFloors').value
+  if (calPts.length < 2) return msg('先点 墙脚角 → 屋顶角（→ 影子尖）', true)
+  if (!(f > 0)) return msg('填这栋楼的层数', true)
+  const j = await api('/calib', { base: calPts[0], roof: calPts[1], tip: calPts[2] || null, floors: f, floorH: +$('#floorH').value || 3 })
+  if (j.ok) { state.calib = j.calib; calPts = []; msg(j.calib.tip ? '已校准（倾斜 + 影子），可以「估算楼高」' : '已校准（只有倾斜，没有影子: 层数需要手填）'); loadFeet() }
+}
+$('#calOk').onclick = setCalib
+$('#heights').onclick = async () => {
+  const j = await api('/heights', {})
+  if (j.started) pollJob(async () => { await reloadState(); await loadFeet() })
+}
+$('#showFloors').onchange = draw
+$('#showFeet').onchange = loadFeet
 
 init()
 </script>

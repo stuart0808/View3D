@@ -125,6 +125,7 @@ export class CityEngine {
   async loadUrl(url) {
     const res = await fetch(url)
     if (!res.ok) throw new Error(`加载场景失败: ${url} (${res.status})`)
+    this.baseUrl = url.slice(0, url.lastIndexOf('/') + 1) // 场景里的相对路径（卫星底图）相对它解析
     this.load(await res.json())
   }
 
@@ -142,7 +143,11 @@ export class CityEngine {
     // 车流要先建: 停车位线是它排的，地面标线要用
     if (this.options.traffic !== false) this.traffic = new Traffic(sceneData, this.nav, rand, { signals: this.signals })
     // 地面要知道: 停车位线（车流排的）、匝道在路缘上开的缺口、桥下的隔离岛
-    world.add(buildGround(sceneData, this.style, this.traffic?.parkingLines || [], (this.traffic?.ramps || []).map((r) => r.gap), this.traffic?.islands || []))
+    this.ground = buildGround(sceneData, this.style, this.traffic?.parkingLines || [], (this.traffic?.ramps || []).map((r) => r.gap), this.traffic?.islands || [])
+    world.add(this.ground)
+    // 卫星底图（导入的场景才有）: 原图按米铺在地面上，打开时隐藏程序生成的路面 / 铺装 / 区域 / 标线，对照识别结果
+    this.imagery = sceneData.imagery ? this.#buildImagery(sceneData.imagery) : null
+    if (this.imagery) { world.add(this.imagery); this.setImagery(this._imageryOn ?? true) }
     // 背景楼块: 核心区以外的简化体块，只是让画面边缘不空
     this.backdrop = buildBackdrop(sceneData, this.style, rand)
     world.add(this.backdrop)
@@ -467,6 +472,38 @@ export class CityEngine {
     this.heatVisible = v
     if (this.heat) this.heat.mesh.visible = v
   }
+
+  /**
+   * 卫星底图平面。scene.imagery = { url（相对场景 json）, widthM, heightM }；map2scene 的坐标原点就在图中心，
+   * 所以平面居中放。高度 1cm: 在路面（0）之上、车和人的脚下，程序生成的地面层隐藏后它就是地面。
+   */
+  #buildImagery(im) {
+    const tex = new THREE.TextureLoader().load(new URL(im.url, new URL(this.baseUrl || '/', location.href)).href)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.anisotropy = 8 // 斜着看的平面，各向异性过滤让远处不糊
+    const geo = new THREE.PlaneGeometry(im.widthM, im.heightM)
+    geo.rotateX(-Math.PI / 2) // 放平；贴图的上边（图的北）朝 −z，和场景的 y 向下一致
+    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: tex, roughness: 1 }))
+    mesh.position.y = 0.01
+    mesh.receiveShadow = true // 楼的影子落在卫星图上，立体感更强
+    mesh.name = 'imagery'
+    return mesh
+  }
+
+  /** 打开 / 关闭卫星底图；场景没有底图返回 false */
+  setImagery(v) {
+    this._imageryOn = v
+    if (!this.imagery) return false
+    this.imagery.visible = v
+    for (const name of ['roadSurface', 'pavement', 'areas', 'markings']) {
+      const o = this.ground?.getObjectByName(name)
+      if (o) o.visible = !v
+    }
+    return true
+  }
+
+  /** 当前场景有没有卫星底图 */
+  get hasImagery() { return !!this.imagery }
 
   /** 跳到下一场场馆活动开始进场的时候；没有排期返回 false */
   jumpToNextEvent() {
