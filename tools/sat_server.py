@@ -89,7 +89,7 @@ def worker():
         # 输出直接写到 OUT/<名字>.json；中间产物（标签图、缓存）放 OUT/_work，不进场景列表
         try:
             j["summary"] = autoscene.run(j["image"], OUT / f"{j['name']}.json", mpp=j["mpp"], geo=j["geo"], use_osm=j["osm"],
-                                         method=j["method"], progress=progress, work_dir=OUT / "_work")
+                                         method=j["method"], progress=progress, work_dir=OUT / "_work", ref_floors=j.get("ref_floors"))
             j["state"] = "done"
             j["scene"] = f"imported/{j['name']}"
             write_index()
@@ -144,7 +144,7 @@ def make_job(qs, body, ext):
     # 10 位十六进制足够一次运行里不撞；jobs 只存在内存里，服务重启后旧 job 查不到（场景文件还在）
     jid = uuid.uuid4().hex[:10]
     # osm 默认开（"1"）；method = auto / roofnet / sam / color，决定用哪种建筑检测
-    jobs[jid] = {"id": jid, "name": name, "image": str(src), "mpp": mpp, "geo": geo, "osm": qs.get("osm", ["1"])[0] == "1",
+    jobs[jid] = {"id": jid, "name": name, "image": str(src), "mpp": mpp, "geo": geo, "osm": qs.get("osm", ["1"])[0] == "1", "ref_floors": num("ref_floors"),
                  "method": qs.get("method", ["auto"])[0], "state": "queued", "stage": "排队", "progress": 0.0, "summary": None, "error": None}
     work.put(jid)
     return jid

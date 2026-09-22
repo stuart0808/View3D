@@ -246,3 +246,30 @@ def test_clip_vegetation_trims_tree_bleed():
     assert sg.clip_vegetation(sg.crop(rect_mask(100, 20, 140, 60)), veg) is None  # 全是树: 丢掉
     holey = rect_mask(20, 20, 100, 60) & ~rect_mask(50, 30, 60, 40)  # 屋顶上有个洞
     assert sg.clip_vegetation(sg.crop(holey), np.zeros((H, W), bool))[2].all()  # 洞被填上
+
+
+def test_shadow_direction_and_auto_heights():
+    # 三栋正射（不倾斜）的楼，影子都朝左上 S 方向；楼高 15 / 30 / 45 米
+    img = np.full((400, 500, 3), 170, np.uint8)
+    crops, sil_all, shadow_all = [], np.zeros((400, 500), bool), np.zeros((400, 500), bool)
+    for (x, y), hgt in zip([(80, 250), (230, 300), (380, 330)], [15.0, 30.0, 45.0]):
+        fp = np.zeros((400, 500), bool)
+        fp[y:y + 30, x:x + 60] = True
+        sil_all |= fp
+        shadow_all |= sg._sweep(fp, S, hgt, "or")
+        crops.append(sg.crop(fp))
+    img[shadow_all & ~sil_all] = 30
+    img[sil_all] = 215
+    shadow, _ = sg.shadow_mask(img)
+    (dx, dy), conf = sg.shadow_direction(sil_all, shadow, 0.5)
+    su = np.array(S) / np.hypot(*S)
+    assert conf > 0.1 and dx * su[0] + dy * su[1] > 0.95  # 方向和真值夹角 < 18°
+    # 太阳高度角换算: |S| = 1.08 像素/米，0.5 m/px → tan(el) = 1 / (1.08 × 0.5) → el ≈ 61.6°
+    el = np.degrees(np.arctan(1 / (np.hypot(*S) * 0.5)))
+    fl, info = sg.auto_heights(crops, img, 0.5, sun_elev_deg=el)
+    assert info["used"] and fl[0] < fl[1] < fl[2]  # 高矮顺序对
+    assert abs(fl[1] - 10) <= 2  # 30 米 ≈ 10 层
+    fl2, info2 = sg.auto_heights(crops, img, 0.5, sun_elev_deg=30.0, ref_floors=10)
+    assert fl2[1] == 10 and info2["scale"] != 1.0  # 参考层数把中位数拉到 10 层
+    flat = np.full((100, 100, 3), 170, np.uint8)  # 没有影子: 不估
+    assert sg.auto_heights([sg.crop(np.pad(np.ones((20, 20), bool), 40))], flat, 0.5)[1]["used"] is False

@@ -308,7 +308,7 @@ def predicted_shadow(foot, s, h, occluders):
     return _sweep(foot, s, h, "or") & ~occluders
 
 
-def estimate_height(silhouette, dark, cal, occluders, h_min=3.0, h_max=180.0, step=3.0, penalty=1.5, min_foot=0.3):
+def estimate_height(silhouette, dark, cal, occluders, h_min=3.0, h_max=180.0, step=3.0, penalty=1.5, min_foot=0.3, geometric=False):
     """
     用影子估楼高。对每个候选高度 h:
         预测影子区域 P(h) = predicted_shadow(footprint(剪影, v, h), s, h, 所有楼的剪影)
@@ -323,6 +323,8 @@ def estimate_height(silhouette, dark, cal, occluders, h_min=3.0, h_max=180.0, st
         dark:       全图的阴影掩膜（用 shadow_mask，别用 dark_mask: 背光的树冠会把楼高撑大）
         cal:        calibrate() 的结果；没有影子向量时返回 None
         occluders:  所有楼的剪影并集（影子落在楼上的部分不计分: 那里是屋顶，不是地面）
+        geometric:  粗扫用几何级数（3, 4.5, 6, 9, 12, 18 … 米）而不是等步长 —— 全自动模式一次估上千栋，
+                    矮楼多、高楼少，这样矮楼几步就定下来；细调时按 ±25% 走
     Returns: (楼高米数 或 None, 最高得分)
     """
     if not cal or cal.get("s") is None:
@@ -366,18 +368,25 @@ def estimate_height(silhouette, dark, cal, occluders, h_min=3.0, h_max=180.0, st
 
     # 第一轮: 粗扫；墙脚一旦太小，更高的也一样，停
     best_h, best = None, -1e18
-    h = h_min
-    while h <= h_max + 1e-6:
-        sc = score(h)
+    if geometric:  # 3, 4.5, 6, 9, 12, 18, 24, 36 …（交替 ×1.5、×4/3）
+        coarse, h, k = [], h_min, 0
+        while h <= h_max + 1e-6:
+            coarse.append(h)
+            h *= 1.5 if k % 2 == 0 else 4 / 3
+            k += 1
+    else:
+        coarse = list(np.arange(h_min, h_max + 1e-6, 2 * step))
+    for h in coarse:
+        sc = score(float(h))
         if sc is None:
             break
         if sc > best:
-            best_h, best = h, sc
-        h += 2 * step
+            best_h, best = float(h), sc
     if best_h is None:
         return None, 0.0
-    # 第二轮: 在最好的粗值两侧各试一步
-    for h in (best_h - step, best_h + step):
+    # 第二轮: 在最好的粗值两侧细调（等步长: ±一步；几何级数: ±12.5%、±25%）
+    fine = (best_h * 0.75, best_h * 0.875, best_h * 1.125, best_h * 1.25) if geometric else (best_h - step, best_h + step)
+    for h in fine:
         if h_min <= h <= h_max:
             sc = score(h)
             if sc is not None and sc > best:
@@ -385,6 +394,92 @@ def estimate_height(silhouette, dark, cal, occluders, h_min=3.0, h_max=180.0, st
     if best <= 0:
         return None, best  # 预测影子里亮的比暗的还多: 这栋楼的影子被别的楼挡了 / 落在树上，看不出来，别瞎猜
     return best_h, best
+
+
+def shadow_direction(bld, shadow, mpp, band_m=(2.0, 8.0), n_dir=36):
+    """
+    全自动估影子方向（不用人点）: 把所有楼的并集朝各个方向平移 2~8m，看平移出去的那一圈（楼外、紧挨着楼）
+    里阴影像素占多少 —— 影子只落在背光的一侧，那个方向的占比明显最高。
+    Args:
+        bld:    所有楼的 bool 掩膜
+        shadow: shadow_mask 的结果
+        mpp:    米/像素
+        band_m: 检查楼外多远的一圈（米）
+        n_dir:  试多少个方向（均匀分布在 360°）
+    Returns: ((dx, dy) 单位向量（图像坐标，y 向下）, 置信度)
+             置信度 = 最佳方向的阴影占比 − 所有方向的平均占比；< 0.1 说明看不出影子（阴天 / 正午 / 楼太矮），调用方别用
+    """
+    b8 = bld.astype(np.uint8)
+    h, w = b8.shape
+    fr = []
+    for k in range(n_dir):
+        a = 2 * math.pi * k / n_dir
+        ux, uy = math.cos(a), math.sin(a)
+        near = np.zeros_like(b8)
+        for d in np.linspace(band_m[0], band_m[1], 4) / mpp:  # 这一圈用 4 次平移近似
+            M = np.float32([[1, 0, ux * d], [0, 1, uy * d]])
+            near |= cv2.warpAffine(b8, M, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
+        ring = (near > 0) & ~bld  # 楼外、在这个方向上的一圈
+        n = int(ring.sum())
+        fr.append(float((ring & shadow).sum()) / n if n else 0.0)
+    fr = np.array(fr)
+    k = int(fr.argmax())
+    conf = float(fr[k] - fr.mean())
+    # 细搜: 最佳方向两侧 ±(360°/n_dir) 内每 2° 再试一次，取占比最高的
+    a0, best_a, best_f = 2 * math.pi * k / n_dir, 2 * math.pi * k / n_dir, fr[k]
+    step = math.radians(2)
+    for j in range(-int(round(math.pi / n_dir / step * 2)), int(round(math.pi / n_dir / step * 2)) + 1):
+        a = a0 + j * step
+        if j == 0:
+            continue
+        ux, uy = math.cos(a), math.sin(a)
+        near = np.zeros_like(b8)
+        for d in np.linspace(band_m[0], band_m[1], 4) / mpp:
+            M = np.float32([[1, 0, ux * d], [0, 1, uy * d]])
+            near |= cv2.warpAffine(b8, M, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
+        ring = (near > 0) & ~bld
+        n = int(ring.sum())
+        f = float((ring & shadow).sum()) / n if n else 0.0
+        if f > best_f:
+            best_a, best_f = a, f
+    return (math.cos(best_a), math.sin(best_a)), conf
+
+
+def auto_heights(crops, img, mpp, sun_elev_deg=50.0, ref_floors=None, floor_h=3.0, min_area_m2=60.0):
+    """
+    全自动估每栋楼的层数: 影子方向由 shadow_direction 估，影子长短 ↔ 楼高的比例由太阳高度角给（默认 50°，
+    国内卫星影像多是上午十点多拍的）；再给 ref_floors（「这一片的楼大多几层」）时，把估出的楼高整体缩放到
+    中位数 = ref_floors，太阳高度角就不重要了。
+    只估面积 ≥ min_area_m2 的楼（更小的影子只有一两个像素，估不准）；看不出影子的楼给 None。
+    Returns: (层数列表（和 crops 一一对应，None = 没估出来）, 信息 dict)
+    """
+    shadow, thr = shadow_mask(img)
+    bld = np.zeros(img.shape[:2], bool)
+    for x0, y0, sub in crops:
+        bld[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] |= sub
+    (dx, dy), conf = shadow_direction(bld, shadow, mpp)
+    info = {"shadow_dir": [round(dx, 3), round(dy, 3)], "confidence": round(conf, 3), "shadow_thr": thr}
+    if conf < 0.1:
+        return [None] * len(crops), dict(info, used=False)
+    per_m = 1.0 / math.tan(math.radians(sun_elev_deg)) / mpp  # 每米楼高，影子在图上伸多少像素
+    cal = {"v": (0.0, 0.0), "s": (dx * per_m, dy * per_m)}  # 自动模式不估倾斜（需要人认立面）
+    hs = []
+    for c in crops:
+        if c[2].sum() * mpp * mpp < min_area_m2:
+            hs.append(None)
+            continue
+        # 这栋楼最高能多高: 最窄边 × 8（和 map2scene 的细长比上限一致），小房子的搜索窗口就很小
+        cnts, _ = cv2.findContours(c[2].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(max(cnts, key=cv2.contourArea))
+        hmax = max(9.0, min(200.0, 8.0 * min(rw, rh) * mpp))
+        h, _ = estimate_height(c, shadow, cal, bld, h_min=3.0, h_max=hmax, step=3.0, geometric=True)
+        hs.append(h)
+    known = [h for h in hs if h]
+    scale = 1.0
+    if ref_floors and known:  # 用参考层数定整体比例
+        scale = ref_floors * floor_h / float(np.median(known))
+    floors = [max(1, min(80, int(round(h * scale / floor_h)))) if h else None for h in hs]
+    return floors, dict(info, used=True, estimated=len(known), scale=round(scale, 3))
 
 
 # ----------------------------------------------------------------------------

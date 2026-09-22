@@ -133,7 +133,8 @@ def test_server_make_job_and_index(tmp_path, monkeypatch):
     jid = sv.make_job(q, b"img", ".jpg")
     j = sv.jobs[jid]
     assert j["mpp"] == 0.3 and j["geo"] is None and j["state"] == "queued" and Path(j["image"]).read_bytes() == b"img"
-    web = sv.jobs[sv.make_job({"name": ["w"], "lat": ["31"], "lon": ["121"], "zoom": ["18"], "datum": ["gcj02"]}, b"x", ".png")]
+    web = sv.jobs[sv.make_job({"name": ["w"], "lat": ["31"], "lon": ["121"], "zoom": ["18"], "datum": ["gcj02"], "ref_floors": ["18"]}, b"x", ".png")]
+    assert web["ref_floors"] == 18.0 and j["ref_floors"] is None
     assert web["geo"] == {"type": "webmerc", "lat": 31.0, "lon": 121.0, "zoom": 18.0, "scale": 1, "datum": "gcj02"}
     with pytest.raises(ValueError):
         sv.make_job({"name": ["../evil"], "mpp": ["1"]}, b"x", ".jpg")  # 场景名会变成文件名，不许带路径

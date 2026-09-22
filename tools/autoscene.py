@@ -193,7 +193,7 @@ def poly_px(pts):
     return np.round(np.asarray(pts)).astype(np.int32).reshape(-1, 1, 2)
 
 
-def build_labels(img, mpp, bld_crops, feats=None, img_roads=None):
+def build_labels(img, mpp, bld_crops, feats=None, img_roads=None, bld_floors=None):
     """
     拼类别图（和 sat2marks 的 labels 一样的编码）。画的顺序决定谁盖谁:
         植被（图像）→ OSM 绿地 / 公园 / 停车场 / 广场 → 水 → 道路 / 高架 → 建筑
@@ -207,6 +207,7 @@ def build_labels(img, mpp, bld_crops, feats=None, img_roads=None):
         feats: osm.features 的结果（已对齐到图像像素坐标），None = 没有 OSM
         img_roads: 网络识别的路面 bool 掩膜（第二版屋顶网络才有），None = 没有；
                    只在 OSM 路网不到 3 条时使用（OSM 的拓扑和路宽更可靠）
+        bld_floors: 和 bld_crops 一一对应的层数（影子估出来的，satgeo.auto_heights），None 的按面积给默认值
 
     labels 是 uint8 (H,W)，每像素一个 CLASSES 里的类别 id，0 = 空地；
     楼列表里 crop = (x0, y0, 掩码)，cls = 建筑类别 id，floors = 层数。
@@ -255,7 +256,7 @@ def build_labels(img, mpp, bld_crops, feats=None, img_roads=None):
         lab[img_roads] = CID["road"]
         road |= img_roads.astype(np.uint8)
     # 图像识别的楼: 去重 → 抠路 → 去碎块，剩下的补进标签图
-    for c in bld_crops:
+    for k, c in enumerate(bld_crops):
         x0, y0, sub = c
         win_o = osm_bld[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]]  # 同一外接框里的 OSM 建筑
         # 30%: 对齐误差让同一栋楼的两个轮廓错开一两米，重叠不会到 100%；低于 30% 多半只是挨着的另一栋
@@ -269,11 +270,12 @@ def build_labels(img, mpp, bld_crops, feats=None, img_roads=None):
         cls = CID["shop2"] if kind == "shop" else CID["residential"]
         # 只写掩码内的像素（布尔索引），外接框里原有的绿地 / 路保持不变
         lab[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]][sub] = cls
-        blds.append({"crop": (x0, y0, sub), "cls": cls, "floors": default_floors(area, kind)})
+        est = bld_floors[k] if bld_floors else None  # 影子估的层数（大厂房 / 商场不信它: 影子多半被遮挡或连成一片）
+        blds.append({"crop": (x0, y0, sub), "cls": cls, "floors": est if (est and kind != "shop") else default_floors(area, kind)})
     return lab, blds
 
 
-def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progress=None, work_dir=None):
+def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progress=None, work_dir=None, ref_floors=None, sun_elev=50.0):
     """
     全流程。progress(阶段名, 0~1 进度) 回调给服务端显示。
     Args:
@@ -314,6 +316,10 @@ def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progre
     say("识别建筑", 0.05)
     crops, used, road_prob = detect_buildings(img, mpp, method, progress=lambda a, b: say("识别建筑", 0.05 + 0.5 * a / max(1, b)))
     img_roads = clean_roads(road_prob, mpp) if road_prob is not None else None  # 网络识别的路面（第二版才有）
+    # 影子估层数: 方向自动找，长度 ↔ 高度按太阳高度角（默认 50°）；给了参考层数就按它定整体比例
+    say("估算楼高", 0.56)
+    bld_floors, hinfo = sg.auto_heights(crops, img, mpp, sun_elev_deg=sun_elev, ref_floors=ref_floors) if crops else ([], {})
+    summary["heights"] = hinfo
     summary.update(method=used, detected=len(crops), image_roads=img_roads is not None)
 
     # ---- 3. OSM（只有知道经纬度时才取）----
@@ -333,7 +339,7 @@ def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progre
 
     # ---- 4. 类别图 → 彩色标记图 + 层数 sidecar（map2scene 的输入格式，和手工 sat2marks 导出的一样）----
     say("拼标注", 0.7)
-    lab, blds = build_labels(img, mpp, crops, feats, img_roads)
+    lab, blds = build_labels(img, mpp, crops, feats, img_roads, bld_floors)
     # 类别 id → BGRA 颜色查找表；map2scene 按颜色认类别，所以颜色必须和 CLASSES 完全一致（不能有抗锯齿）
     lut = np.zeros((256, 4), np.uint8)
     for c in CLASSES:
@@ -405,12 +411,14 @@ def main():
     ap.add_argument("--geo-json", help="从 json 文件的 geo 字段读地理参考（比如 fetch_samples 的 sn_*_gt.json）")
     ap.add_argument("--no-osm", action="store_true")
     ap.add_argument("--method", choices=["auto", "roofnet", "sam", "color"], default="auto")
+    ap.add_argument("--ref-floors", type=float, help="这一片的楼大多几层（按它定影子估高的整体比例）")
+    ap.add_argument("--sun-elev", type=float, default=50.0, help="太阳高度角（度），不给参考层数时用它换算影子长度")
     a = ap.parse_args()
     # 纬度可以是 0（赤道），所以判 is not None；缩放级别不会是 0，直接判真
     geo = {"type": "webmerc", "lat": a.lat, "lon": a.lon, "zoom": a.zoom, "scale": a.scale, "datum": a.datum} if a.zoom and a.lat is not None else None
     if a.geo_json:
         geo = json.loads(Path(a.geo_json).read_text("utf-8"))["geo"]
-    res = run(a.image, a.out, a.mpp, geo, not a.no_osm, a.method, progress=lambda s, p: print(f"[auto] {p:4.0%} {s}", file=sys.stderr, flush=True))
+    res = run(a.image, a.out, a.mpp, geo, not a.no_osm, a.method, ref_floors=a.ref_floors, sun_elev=a.sun_elev, progress=lambda s, p: print(f"[auto] {p:4.0%} {s}", file=sys.stderr, flush=True))
     print(json.dumps(res, ensure_ascii=False))
 
 

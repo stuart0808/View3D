@@ -19,6 +19,7 @@ const zoom = ref(18)
 const hidpi = ref(false) // 高分屏截图: 每个地图像素占 2 个屏幕像素
 const datum = ref('wgs84') // 高德 / 腾讯卫星图用 gcj02
 const useOsm = ref(true) // 从 OpenStreetMap 取道路 / 水系（只有给了地理位置才有意义）
+const refFloors = ref('') // 可选: 这一片的楼大多几层；影子估高按它定整体比例（不填按太阳高度角 50° 估）
 const job = ref(null) // 后端返回的进度
 const error = ref('')
 // 处理中（排队或运行）时按钮置灰，避免重复提交同一张图
@@ -42,6 +43,7 @@ async function start() {
   // 参数都放在查询串里，请求体就是图片本身（不用 multipart，后端解析简单）
   const q = new URLSearchParams({ name: name.value, osm: useOsm.value && mode.value !== 'mpp' ? '1' : '0' })
   if (mode.value === 'mpp') q.set('mpp', mpp.value)
+  if (+refFloors.value > 0) q.set('ref_floors', refFloors.value) // 空着就不传
   // 截图模式: 后端按 Web 墨卡托把 中心 + 级别 换成每个像素的经纬度
   if (mode.value === 'web') {
     q.set('lat', lat.value); q.set('lon', lon.value); q.set('zoom', zoom.value)
@@ -108,6 +110,8 @@ function poll(id) {
     <label v-if="mode !== 'mpp'" class="row"><input v-model="useOsm" type="checkbox" /> 从 OpenStreetMap 取道路、水系、绿地（需联网）</label>
     <!-- 只给分辨率时的提醒 -->
     <p v-if="mode === 'mpp'" class="hint">只给分辨率时没有地理位置，道路只能靠图像，效果差一些；能给出经纬度更好。</p>
+    <!-- 参考层数（可选）: 影子只给出楼的相对高矮，绝对高度靠它或默认太阳高度角 -->
+    <div class="row">参考层数 <input v-model="refFloors" type="number" min="1" step="1" placeholder="可不填" /> <span class="hint">这一片的楼大多几层</span></div>
     <!-- 开始 / 进度 / 结果摘要 / 错误 -->
     <div class="row"><button class="go" :disabled="busy" @click="start">{{ busy ? '处理中…' : '开始处理' }}</button></div>
     <!-- 进度条: 阶段名 + 百分比 -->
