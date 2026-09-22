@@ -741,6 +741,38 @@ def match_drawn_road(pts, roads, pad):
     return lanes, (1 if float((T * dirs).sum()) >= 0 else -1)
 
 
+def apply_junctions(nodes, junctions, reach=12.0):
+    """
+    场景编辑器的路口设置 → roadGraph 节点属性（就地修改 nodes）
+
+    编辑器里的路口是用户点的一个位置，生成前还不知道路网会被骨架化成哪些节点，所以按距离对:
+    每条设置找「度 ≥ 3、离得最近、且在 路口半径 + reach 米以内」的节点。
+    Args:
+        nodes: roadGraph["nodes"]，{id: {pos, radius, degree, ...}}，坐标米
+        junctions: [{pos: [x, y] 米, control: "signal" | "none", green: [东西, 南北] 秒 | None, noLeft: 布尔}]
+    Returns:
+        对上的个数
+    """
+    hit = 0
+    for j in junctions:
+        best, bd = None, None
+        for n in nodes.values():
+            if n.get("degree", 0) < 3 or n.get("roundabout") or n.get("level"):
+                continue  # 只有平面交叉的路口才有灯 / 转向限制
+            d = math.hypot(n["pos"][0] - j["pos"][0], n["pos"][1] - j["pos"][1])
+            if d <= n.get("radius", 0) + reach and (bd is None or d < bd):
+                best, bd = n, d
+        if best is None:
+            continue
+        hit += 1
+        best["control"] = "none" if j.get("control") == "none" else "signal"
+        if j.get("green") and best["control"] == "signal":
+            best["signal"] = {"green": [float(j["green"][0]), float(j["green"][1])]}
+        if j.get("noLeft"):
+            best["noLeft"] = True
+    return hit
+
+
 def geom_to_json(g, nd=2):
     """
     shapely 几何 → [{polygon, holes}]（多部件拆开，面积 < 1㎡ 的丢掉），坐标保留 nd 位小数。
@@ -875,7 +907,9 @@ def main():
         if len(ring) < 3:
             continue
         cv2.fillPoly(bmask_all, [np.round(ring).astype(np.int32).reshape(-1, 1, 2)], 255)  # 也要从道路 / 铺装里扣掉
-        mk = {"kind": fp.get("kind", "residential"), "floors": fp.get("floors") or 2, "fixed_floors": bool(fp.get("floors"))}
+        mk = {"kind": fp.get("kind", "residential"), "floors": fp.get("floors") or 2, "fixed_floors": bool(fp.get("floors")),
+              # 场景编辑器改已有场景时带上原来的楼编号和属性: 编号不变，实地标注等按编号挂的数据才对得上
+              "id": fp.get("id"), "attrs": fp.get("attrs") or {}}
         raw.append((mk, to_m(ring), []))
     if side_early.get("footprints"):
         log(f"sidecar 单栋轮廓: {len(side_early['footprints'])} 栋")
@@ -888,6 +922,24 @@ def main():
 
     # 每栋楼: 自己的主方向（接近全局主方向就直接用全局的）→ 直角化 → 层数（写字楼按占地面积 6~28 层，住宅 9~18 层）
     buildings = []
+    # 楼编号: sidecar 指定了就用（重复的只认第一个），其余从 b1 起顺序编、跳过已被占用的
+    given, used = set(), set()
+    for mk, _, _ in raw:
+        bid = mk.get("id")
+        if isinstance(bid, str) and bid and bid not in given:
+            given.add(bid)
+        else:
+            mk["id"] = None  # 重复 / 非法: 当成没指定
+    next_no = 1  # 下一个候选编号
+
+    def new_id():
+        """下一个没被指定编号占用的 b<n>"""
+        nonlocal next_no
+        while f"b{next_no}" in given or f"b{next_no}" in used:
+            next_no += 1
+        used.add(f"b{next_no}")
+        return f"b{next_no}"
+
     for k, (mk, shell, holes) in enumerate(raw):
         ang = dominant_angle([shell])
         if ang_diff90(ang, g_ang) < math.radians(7):  # 7° 以内的偏差视为手抖，统一到街区方向，整片楼才会齐
@@ -901,7 +953,9 @@ def main():
             floors = int(min(28, 6 + poly.area // 260 + (k * 7) % 5))  # 每 260㎡ 占地加 1 层，再加按序号的伪随机抖动，封顶 28
         elif kind == "residential":
             floors = 9 + (k * 5) % 10  # 9~18 层，按序号错开，避免一排楼一样高
-        buildings.append(dict(id=f"b{k + 1}", kind=kind, floors=floors, angle=ang, geom=poly))
+        # attrs: 编辑器带过来的属性（场馆信息、实地标注写回的商户清单和吸引力、名称），原样写进场景
+        attrs = {a: mk["attrs"][a] for a in ("venue", "attraction", "shops", "name") if a in mk.get("attrs", {})}
+        buildings.append(dict(id=mk.get("id") or new_id(), kind=kind, floors=floors, angle=ang, geom=poly, **attrs))
     b_union = unary_union([b["geom"] for b in buildings]) if buildings else Polygon()  # 米制建筑并集，后面区域 / 可走范围要减掉它
 
     # ---------------- 道路 / 地块 / 人行铺装 ----------------
@@ -1031,7 +1085,8 @@ def main():
 
     # ---------------- 道路中心线 / 斑马线 ----------------
     # road_graph 是前端车流的骨干数据:
-    #   nodes[id] = {pos 米, radius 路口半径（到路边距离）米, degree 度, roundabout?, level?}
+    #   nodes[id] = {pos 米, radius 路口半径（到路边距离）米, degree 度, roundabout?, level?,
+    #                control? / signal? / noLeft? 编辑器的路口设置（无灯、绿灯时长、禁止左转）}
     #   edges[]   = {a, b 节点 id, width 路宽米, points 中心线米, ext [两端路口深度], oneway?, roundabout?, median?, level?,
     #                laneCount? 编辑器指定的每方向车道数}
     # lanes 是给渲染用的车道线（已截掉路口和斑马线），crosswalks 是斑马线；三者坐标都是米
@@ -1240,6 +1295,8 @@ def main():
                     # 编辑器画的单行路: 点序调成行驶方向；laneCount 让前端按指定车道数排车道
                     lanes.append(dict(points=piece if oneway >= 0 else piece[::-1], width=w_m, median=median, oneway=bool(oneway), laneCount=lane_n))
         log(f"道路中心线 {len(lanes)} 段, 斑马线 {len(crosswalks)} 处")
+        # 编辑器的路口设置（sidecar junctions，像素坐标）: 对到最近的路口节点上，写进节点给前端的信号灯 / 车流用
+        apply_junctions(road_graph["nodes"], [dict(j, pos=to_m(j["pos"]).tolist()) for j in side_early.get("junctions", [])])
 
     # ---------------- 高架 ----------------
     # 桥面多边形 + 自己的骨架图（节点 id 加 e 前缀，level=1）；不和地面路网相连，上下桥的匝道由前端按需生成
@@ -1449,8 +1506,9 @@ def main():
         "site": geom_to_json(site),
         "pavement": geom_to_json(pavement),
         "buildings": [
-            {"id": b["id"], "kind": b["kind"], "floors": b["floors"], "angle": round(b["angle"], 5), "attraction": 1.0,
+            {"id": b["id"], "kind": b["kind"], "floors": b["floors"], "angle": round(b["angle"], 5), "attraction": b.get("attraction", 1.0),
              **({"venue": b["venue"]} if b.get("venue") else {}),
+             **({"name": b["name"]} if b.get("name") else {}), **({"shops": b["shops"]} if b.get("shops") else {}),
              **geom_to_json(b["geom"])[0]}
             for b in buildings if geom_to_json(b["geom"])
         ],
