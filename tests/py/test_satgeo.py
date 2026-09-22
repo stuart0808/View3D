@@ -42,6 +42,11 @@ def scene(height=30.0, foot=(90, 110, 170, 140)):
 
 # ---------------------------------------------------------------------------
 def test_mpp_from_zoom():
+    """Web 墨卡托缩放级别 → 米/像素
+
+    截图模式全靠它定比例尺，算错了整座城会放大缩小。
+    检查三件事: 赤道 0 级的基准值、纬度余弦修正、高分屏倍率（scale=2 相当于再放大一级）。
+    """
     # 赤道 0 级约 156543 m/px；每放大一级减半；纬度 60° 再乘 cos60° = 0.5
     assert sg.mpp_from_zoom(0, 0) == pytest.approx(156543.03392)
     assert sg.mpp_from_zoom(0, 18) == pytest.approx(0.597, abs=1e-3)
@@ -50,6 +55,12 @@ def test_mpp_from_zoom():
 
 
 def test_vegetation_and_dark_masks():
+    """植被掩膜只认绿色，暗部掩膜只认真正的黑块
+
+    合成图上半是绿地、左下是阴影、其余是灰色地面:
+    植被只能出现在上半；自动阈值要落在合理区间并且只圈出左下；
+    手动给极低阈值时应该什么都不选（证明手动阈值确实生效）。
+    """
     img = np.full((40, 40, 3), 160, np.uint8)
     img[:20] = (40, 150, 40)  # 上半: 绿色（BGR）
     img[20:, :20] = (25, 25, 25)  # 左下: 阴影
@@ -63,6 +74,12 @@ def test_vegetation_and_dark_masks():
 
 
 def test_prompt_points_skip_excluded_and_margin():
+    """SAM 提示点: 排除区（植被 / 阴影）里不放点，margin 让出图边
+
+    排除区先腐蚀 3 像素再用，所以边界附近还能留点；
+    不排除时 10 像素步长的 100×100 图正好 10×10 个点；
+    margin=20 时所有点都在 [20, 80) 以内（贴边的点 SAM 容易切出半栋楼）。
+    """
     img = np.zeros((100, 100, 3), np.uint8)
     ex = np.zeros((100, 100), bool)
     ex[:, :50] = True  # 左半边不放点
@@ -75,6 +92,11 @@ def test_prompt_points_skip_excluded_and_margin():
 
 
 def test_features_and_score():
+    """掩膜特征（面积 / 实心度 / 矩形度 / 长宽比）和建筑打分
+
+    一个 60×30 的实心矩形应当是满分附近的楼；
+    整块是绿的、细长条（像路）、太小的都应该给 0 分；空掩膜面积为 0 不报错。
+    """
     veg = np.zeros((H, W), bool)
     dark = np.zeros((H, W), bool)
     box = rect_mask(50, 50, 110, 80)
@@ -94,6 +116,11 @@ def test_features_and_score():
 
 
 def test_select_candidates_prefers_whole_building_and_splits_merged_pair():
+    """候选去重: 整栋胜过半栋，两栋被细缝连起来的大块不要
+
+    SAM 对同一个点会给出多级掩膜（半栋 / 整栋 / 连着邻楼），
+    这里期望留下整栋和另一栋独立的楼，半栋被整栋覆盖掉，连体块被拆分判掉。
+    """
     whole = rect_mask(20, 20, 80, 50)
     part = rect_mask(20, 20, 50, 50)  # 同一栋楼的左半
     other = rect_mask(120, 20, 170, 50)
@@ -106,6 +133,11 @@ def test_select_candidates_prefers_whole_building_and_splits_merged_pair():
 
 
 def test_calibrate():
+    """从三个点击点反推倾斜向量和影子向量
+
+    墙脚、屋顶、影子尖三个像素点 + 已知楼高 → 每米高度的偏移；
+    没点影子时 s 为 None（后续就不做影子估高）。
+    """
     cal = sg.calibrate((100, 100), (100, 85), (82, 73), 30)
     assert cal["v"] == pytest.approx((0, -0.5))
     assert cal["s"] == pytest.approx((-0.6, -0.9))
@@ -113,6 +145,10 @@ def test_calibrate():
 
 
 def test_footprint_inverts_lean():
+    """倾斜拍摄的剪影 → 墙脚: 反向扫回去应当和真实墙脚高度重合
+
+    用合成楼验证 IoU > 0.95；倾斜向量为零（正射图）时应原样返回剪影。
+    """
     img, sil, fp = scene(height=30)
     got = sg.footprint(sil, V, 30)
     iou = (got & fp).sum() / (got | fp).sum()
@@ -123,6 +159,10 @@ def test_footprint_inverts_lean():
 
 @pytest.mark.parametrize("height", [15.0, 30.0, 45.0])
 def test_estimate_height_from_shadow(height):
+    """影子长度估楼高: 15 / 30 / 45 米三种楼都能在 ±3 米内估回来
+
+    合成图的影子方向和长度严格按 S × 楼高画，所以误差只来自搜索步长和像素化。
+    """
     img, sil, fp = scene(height=height)
     dark, _ = sg.dark_mask(img)
     cal = dict(v=V, s=S)
@@ -132,6 +172,10 @@ def test_estimate_height_from_shadow(height):
 
 
 def test_estimate_height_without_shadow_calibration():
+    """没有影子向量、或者楼的掩膜是空的，都返回 (None, 0)
+
+    调用方据此回退到按面积给默认层数，不能抛异常打断整个流水线。
+    """
     img, sil, _ = scene()
     dark, _ = sg.dark_mask(img)
     assert sg.estimate_height(sil, dark, dict(v=V, s=None), sil) == (None, 0.0)
@@ -142,6 +186,10 @@ def test_estimate_height_without_shadow_calibration():
 # 分块 / 裁剪块 / 候选流水线
 # ---------------------------------------------------------------------------
 def test_tiles_cover_image_with_full_size_blocks():
+    """大图切块: 每块都满尺寸、最后一列贴边、并集覆盖整张图
+
+    满尺寸是为了 SAM / 网络输入大小一致；比块还小的图就整张一块。
+    """
     assert sg.tiles(800, 600) == [(0, 0, 800, 600)]  # 比块小: 整张
     bx = sg.tiles(2500, 1100, size=1024, overlap=256)
     xs = sorted({b[0] for b in bx})
@@ -154,6 +202,10 @@ def test_tiles_cover_image_with_full_size_blocks():
 
 
 def test_crop_roundtrip():
+    """裁剪块 (x0, y0, 子掩膜) 与全图掩膜互转
+
+    流水线里上百栋楼都存裁剪块省内存，来回转换必须无损；空掩膜裁剪返回 None。
+    """
     m = rect_mask(30, 40, 70, 45)
     c = sg.crop(m)
     assert c[0] == 30 and c[1] == 40 and c[2].shape == (5, 40)
@@ -172,6 +224,11 @@ def town():
 
 
 def test_find_buildings_with_fake_segmenter():
+    """SAM 流程（用假分割器代替真模型，跑得快、结果确定）
+
+    假分割器对每个提示点返回整块 + 一个多余的半块，
+    期望最后只剩两栋完整的楼，而且分数都高。
+    """
     img = town()
     calls = []
 
@@ -198,6 +255,10 @@ def test_find_buildings_with_fake_segmenter():
 
 
 def test_find_buildings_without_sam_uses_color_blobs():
+    """没有 SAM 时退回颜色连通块
+
+    进度回调只报一次 (1, 1)；结果里不能把绿地当成楼。
+    """
     img = town()
     prog = []
     got = sg.find_buildings(img, 0.5, None, progress=lambda a, b: prog.append((a, b)))
@@ -209,6 +270,10 @@ def test_find_buildings_without_sam_uses_color_blobs():
 
 
 def test_shadow_mask_ignores_speckled_dark_foliage():
+    """影子掩膜: 大块真阴影要全部选中，斑点状的背光树冠不要
+
+    树冠的暗斑小而碎，形态学开运算之后应当几乎全被去掉（< 2%）。
+    """
     rng = np.random.default_rng(0)
     img = np.full((120, 160, 3), 170, np.uint8)
     img[10:60, 10:80] = 25  # 大块真阴影
@@ -221,6 +286,10 @@ def test_shadow_mask_ignores_speckled_dark_foliage():
 
 
 def test_estimate_height_unknown_when_shadow_hidden():
+    """影子被挡住 / 落在亮处看不见时，给「不知道」而不是瞎估一个数
+
+    调用方会把 None 换成同片中位数或按面积的默认层数。
+    """
     img, sil, _ = scene(height=30)
     img[img[..., 0] == 35] = 170  # 把影子抹掉（被别的楼挡住 / 落在亮处）
     dark, _ = sg.shadow_mask(img)
@@ -229,6 +298,10 @@ def test_estimate_height_unknown_when_shadow_hidden():
 
 
 def test_estimate_height_accepts_crop():
+    """estimate_height 接受裁剪块和全图掩膜两种输入，结果一致
+
+    空裁剪块同样返回 (None, 0)。
+    """
     img, sil, _ = scene(height=30)
     dark, _ = sg.shadow_mask(img)
     full = sg.estimate_height(sil, dark, dict(v=V, s=S), sil, step=1.5)
@@ -238,6 +311,10 @@ def test_estimate_height_accepts_crop():
 
 
 def test_clip_vegetation_trims_tree_bleed():
+    """SAM 掩膜漏进旁边树里的部分要剪掉
+
+    剪完只剩楼本身；整块都是树的直接丢掉；屋顶上的小洞（空调外机、天窗）要填上。
+    """
     veg = np.zeros((H, W), bool)
     veg[20:60, 100:140] = True  # 楼右边挨着一片树
     m = rect_mask(20, 20, 140, 60)  # SAM 掩膜: 楼（20~100）+ 漏进树里（100~140）
@@ -249,6 +326,12 @@ def test_clip_vegetation_trims_tree_bleed():
 
 
 def test_shadow_direction_and_auto_heights():
+    """全自动估高: 先找影子方向，再按太阳高度角或参考层数换算层数
+
+    三栋正射楼的影子都朝 S 方向，期望:
+      方向和真值夹角 < 18°；高矮顺序正确；30 米的楼约 10 层；
+      给了参考层数时整体比例被拉到中位数 = 参考层数；没有影子的图不估。
+    """
     # 三栋正射（不倾斜）的楼，影子都朝左上 S 方向；楼高 15 / 30 / 45 米
     img = np.full((400, 500, 3), 170, np.uint8)
     crops, sil_all, shadow_all = [], np.zeros((400, 500), bool), np.zeros((400, 500), bool)
@@ -273,3 +356,23 @@ def test_shadow_direction_and_auto_heights():
     assert fl2[1] == 10 and info2["scale"] != 1.0  # 参考层数把中位数拉到 10 层
     flat = np.full((100, 100, 3), 170, np.uint8)  # 没有影子: 不估
     assert sg.auto_heights([sg.crop(np.pad(np.ones((20, 20), bool), 40))], flat, 0.5)[1]["used"] is False
+
+
+def test_auto_heights_ignores_dark_roofs_without_real_shadows():
+    """没有真正楼影的图（老城区深色瓦屋顶）不估高
+
+    以前最暗的屋顶会被当成影子，结果整片老房子被画成塔楼。
+    现在阴影阈值 ≥ 60 或方向置信度 < 0.15 时直接放弃，全部返回 None。
+    """
+    # 老城区那种图: 最暗的是深色瓦屋顶（亮度 70 左右），没有真正的楼影 → 不该拿来估高
+    rng = np.random.default_rng(1)
+    img = rng.integers(110, 170, (300, 300, 3)).astype(np.uint8)
+    crops = []
+    for k in range(9):
+        y, x = 20 + (k // 3) * 95, 20 + (k % 3) * 95
+        img[y:y + 40, x:x + 60] = 70  # 深色屋顶
+        m = np.zeros((300, 300), bool)
+        m[y:y + 40, x:x + 60] = True
+        crops.append(sg.crop(m))
+    fl, info = sg.auto_heights(crops, img, 0.5)
+    assert info["used"] is False and all(f is None for f in fl)

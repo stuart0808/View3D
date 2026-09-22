@@ -407,7 +407,7 @@ def shadow_direction(bld, shadow, mpp, band_m=(2.0, 8.0), n_dir=36):
         band_m: 检查楼外多远的一圈（米）
         n_dir:  试多少个方向（均匀分布在 360°）
     Returns: ((dx, dy) 单位向量（图像坐标，y 向下）, 置信度)
-             置信度 = 最佳方向的阴影占比 − 所有方向的平均占比；< 0.1 说明看不出影子（阴天 / 正午 / 楼太矮），调用方别用
+             置信度 = 最佳方向的阴影占比 − 所有方向的平均占比；< 0.15 说明看不出影子（阴天 / 正午 / 楼太矮），调用方别用
     """
     b8 = bld.astype(np.uint8)
     h, w = b8.shape
@@ -459,7 +459,10 @@ def auto_heights(crops, img, mpp, sun_elev_deg=50.0, ref_floors=None, floor_h=3.
         bld[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] |= sub
     (dx, dy), conf = shadow_direction(bld, shadow, mpp)
     info = {"shadow_dir": [round(dx, 3), round(dy, 3)], "confidence": round(conf, 3), "shadow_thr": thr}
-    if conf < 0.1:
+    # 两个条件都满足才用影子: ① 亮度直方图里有一群明显的楼影暗峰（阈值 < 60；被夹到上限 65 说明「最暗的一群」
+    # 其实是深色瓦屋顶 / 沥青路，拿它当影子会把楼估得奇高 —— 老城区样例五六层的楼被估成二三十层）；
+    # ② 方向置信度够高（背光一侧的阴影明显多于其他方向）
+    if thr >= 60 or conf < 0.15:
         return [None] * len(crops), dict(info, used=False)
     per_m = 1.0 / math.tan(math.radians(sun_elev_deg)) / mpp  # 每米楼高，影子在图上伸多少像素
     cal = {"v": (0.0, 0.0), "s": (dx * per_m, dy * per_m)}  # 自动模式不估倾斜（需要人认立面）
