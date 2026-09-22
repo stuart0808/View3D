@@ -18,6 +18,18 @@
     "floors": 5
   },
   {
+    "color": "#00FF80",
+    "layer": "building",
+    "kind": "residential",
+    "floors": 11
+  },
+  {
+    "color": "#80FF00",
+    "layer": "building",
+    "kind": "venue",
+    "floors": 4
+  },
+  {
     "color": "#0000FF",
     "layer": "road"
   },

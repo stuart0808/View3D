@@ -1,0 +1,37 @@
+{
+  "hash": "19277934",
+  "configHash": "13f8af4e",
+  "lockfileHash": "cf493195",
+  "browserHash": "db28a899",
+  "optimized": {
+    "three": {
+      "src": "../../node_modules/three/build/three.module.js",
+      "file": "three.js",
+      "fileHash": "af4d1992",
+      "needsInterop": false
+    },
+    "three/addons/controls/OrbitControls.js": {
+      "src": "../../node_modules/three/examples/jsm/controls/OrbitControls.js",
+      "file": "three_addons_controls_OrbitControls__js.js",
+      "fileHash": "86d03a85",
+      "needsInterop": false
+    },
+    "three/addons/utils/BufferGeometryUtils.js": {
+      "src": "../../node_modules/three/examples/jsm/utils/BufferGeometryUtils.js",
+      "file": "three_addons_utils_BufferGeometryUtils__js.js",
+      "fileHash": "656ce788",
+      "needsInterop": false
+    },
+    "vue": {
+      "src": "../../node_modules/vue/dist/vue.runtime.esm-bundler.js",
+      "file": "vue.js",
+      "fileHash": "6511f7c1",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "chunk-X4I6YUAK": {
+      "file": "chunk-X4I6YUAK.js"
+    }
+  }
+}
