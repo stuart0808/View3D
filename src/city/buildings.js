@@ -1,9 +1,15 @@
-// 由二维轮廓程序化生成「白模 + 店面」风格的建筑。只依赖轮廓、层数和哪些边临街。
+// 程序化建筑。输入只有二维轮廓、类型（kind）、层数；每类建筑有几种「原型」，由楼的编号确定性地选，
+// 所以同一个场景每次打开都一样，但街上不会全是一个模子刻出来的楼。
+//   住宅 residential  板楼（阳台 + 楼梯间竖条）/ 退台顶层 / 点式；暖色涂料墙面
+//   写字楼 block       玻璃幕墙塔楼（竖向肋 + 塔冠）/ 裙房 + 石材格窗 / 逐级收分的塔楼
+//   商业 shop          大商场（入口门头 + 屋顶采光天窗）/ 沿街小商铺（遮阳篷）；临街面都是橱窗 + 招牌
+//   场馆 venue         体育场 / 壳体剧院（见 buildVenue）
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { signedArea, edgeNormal, offsetPolygon, roundPolygon, makeShape, toGround, interiorPoints, distToPolygonEdge } from './geometry.js'
 
-const FLOOR_H = 4.4
+const CORNER_R = 1.6
+const FLOOR_H = { shop: 4.4, block: 4.0, residential: 3.1, venue: 4.4 }
 
 /**
  * 室内视图要「单独隐藏某一栋楼」，但所有楼是合并成几个大网格画的。
@@ -30,81 +36,57 @@ function tag(geometry, bid) {
   geometry.setAttribute('bid', new THREE.BufferAttribute(new Float32Array(geometry.attributes.position.count).fill(bid), 1))
   return geometry
 }
-const CORNER_R = 1.6
 
-// 店面主题: [玻璃色, 招牌色]
-const SHOP_THEMES = [
-  ['#8fb4cf', '#2b3a4e'],
-  ['#9cc0d6', '#23405c'],
-  ['#d9a86a', '#6b4226'],
-  ['#e0b57c', '#8a5a33'],
-  ['#a9b6c2', '#33363c'],
-  ['#c9935a', '#3a2a20'],
+const _c = new THREE.Color()
+/** 给几何体刷一个纯色（顶点色）。墙体类的网格共用一个白色材质，颜色全靠它 */
+function paint(geometry, hex) {
+  _c.set(hex)
+  const n = geometry.attributes.position.count, col = new Float32Array(n * 3)
+  for (let i = 0; i < n; i++) { col[i * 3] = _c.r; col[i * 3 + 1] = _c.g; col[i * 3 + 2] = _c.b }
+  geometry.setAttribute('color', new THREE.BufferAttribute(col, 3))
+  return geometry
+}
+
+// ---------------------------------------------------------------------------
+// 调色板
+// ---------------------------------------------------------------------------
+const SHOP_THEMES = [ // [玻璃色, 招牌色]
+  ['#8fb4cf', '#2b3a4e'], ['#9cc0d6', '#23405c'], ['#d9a86a', '#6b4226'],
+  ['#e0b57c', '#8a5a33'], ['#a9b6c2', '#33363c'], ['#c9935a', '#3a2a20'],
 ]
+const RESI_WALL = ['#ebe3d5', '#e6d8c6', '#dde0e4', '#e9dcd2', '#e1e5da', '#f0e9dc']
+const RESI_ACCENT = ['#b9694f', '#7d8fa3', '#9a8566', '#6f8f7a', '#a85f4a', '#5f7c96']
+const OFFICE_GLASS = ['#7f9db8', '#6e8ea6', '#8aa7b5', '#5f7d94', '#93a9bd', '#789a9c']
+const OFFICE_STONE = ['#d8dade', '#cfd3d8', '#e0dcd4', '#c9ced4']
+const MALL_WALL = ['#e4e6e9', '#dcdfe3', '#e9e4dc', '#d9dde2']
+const MALL_ACCENT = ['#d2603a', '#2f6fd0', '#d59a2a', '#2f9c8f', '#b8456b']
+const AWNING = ['#c4553e', '#2f7d6b', '#d09a3a', '#4a6fa5', '#8c4a6e']
+
+const pick = (arr, k) => arr[((k % arr.length) + arr.length) % arr.length]
 
 export function buildBuildings(scene, nav, rand, style) {
   const group = new THREE.Group()
   group.name = 'buildings'
-  const walls = [], trims = [], roofs = [], heatRoofs = []
-  const glass = [], signs = [], frames = [] // {pos, quat, scale, color}
-  const extras = { pitch: [], venueGlass: [] } // 场馆专用的几类面: 草坪、玻璃幕
+  // 合并用的几何体列表: 实体墙面 / 玻璃幕墙 / 带分缝贴图的屋面 / 屋顶热力层 / 场馆草坪
+  const L = { solid: [], glassy: [], roofs: [], heat: [], pitch: [] }
+  // 实例化的小盒子: 橱窗和窗带 / 招牌 / 其他细部（壁柱、阳台、竖肋、遮阳篷…），元素 {pos, quat, scale, color}
+  const I = { glass: [], signs: [], details: [] }
 
   scene.buildings.forEach((b, bid) => {
-    const mark = [walls.length, trims.length, roofs.length, heatRoofs.length, glass.length, signs.length, frames.length]
-    if (b.kind === 'venue') {
-      // 活动场馆不走「轮廓拉伸 + 店面」那一套，按类型做专门的造型
-      const em = [extras.pitch.length, extras.venueGlass.length]
-      buildVenue(b, walls, trims, heatRoofs, extras)
-      ;[walls, trims, roofs, heatRoofs].forEach((list, k) => { for (let i = mark[k]; i < list.length; i++) tag(list[i], bid) })
-      ;[extras.pitch, extras.venueGlass].forEach((list, k) => { for (let i = em[k]; i < list.length; i++) tag(list[i], bid) })
-      return
-    }
-    const h = (b.floors || 2) * FLOOR_H
-    const holes = b.holes || []
-    const body = roundPolygon(b.polygon, CORNER_R)
-    const rHoles = holes.map((hh) => roundPolygon(hh, 0.8))
-
-    // 墙体
-    walls.push(toGround(new THREE.ExtrudeGeometry(makeShape(body, rHoles), { depth: h, bevelEnabled: false, curveSegments: 1 })))
-
-    // 屋檐 + 女儿墙: 外轮廓外扩做挑檐，内缩做女儿墙内沿
-    const outer = offsetPolygon(b.polygon, 0.4) || b.polygon
-    const inner = offsetPolygon(b.polygon, -0.55)
-    const outerR = roundPolygon(outer, CORNER_R + 0.4)
-    const okInner = inner && Math.abs(signedArea(inner)) > Math.abs(signedArea(b.polygon)) * 0.4
-    if (okInner) {
-      const innerR = roundPolygon(inner, Math.max(0.3, CORNER_R - 0.55))
-      const holeRings = [innerR]
-      // 内院: 女儿墙环也要避开
-      const innerHoles = holes.map((hh) => offsetPolygon(hh, 0.4) || hh)
-      trims.push(toGround(new THREE.ExtrudeGeometry(makeShape(outerR, holeRings), {
-        depth: 1.0, bevelEnabled: true, bevelSize: 0.12, bevelThickness: 0.12, bevelSegments: 2, curveSegments: 1,
-      }), h - 0.45))
-      roofs.push(toGround(new THREE.ShapeGeometry(makeShape(innerR, innerHoles.map((x) => roundPolygon(x, 0.8)))), h + 0.02))
-      heatRoofs.push(toGround(new THREE.ShapeGeometry(makeShape(innerR, innerHoles.map((x) => roundPolygon(x, 0.8)))), h + 0.1))
-      for (const ih of innerHoles) {
-        const ring = offsetPolygon(ih, 0.5)
-        if (ring) trims.push(toGround(new THREE.ExtrudeGeometry(makeShape(roundPolygon(ring, 1.0), [roundPolygon(ih, 0.8)]), { depth: 1.0, bevelEnabled: false }), h - 0.45))
-      }
-    } else {
-      // 轮廓太碎，内缩失败 → 退化成一块带倒角的屋面板
-      trims.push(toGround(new THREE.ExtrudeGeometry(makeShape(outerR, rHoles), {
-        depth: 0.5, bevelEnabled: true, bevelSize: 0.12, bevelThickness: 0.12, bevelSegments: 2, curveSegments: 1,
-      }), h - 0.1))
-      heatRoofs.push(toGround(new THREE.ShapeGeometry(makeShape(body, rHoles)), h + 0.6))
-    }
-
-    addFacades(b, h, nav, rand, glass, signs, frames)
-    addRoofProps(b, h, rand, trims)
-    // 这一栋新增的所有几何体/实例统一打上编号
-    ;[walls, trims, roofs, heatRoofs].forEach((list, k) => { for (let i = mark[k]; i < list.length; i++) tag(list[i], bid) })
-    ;[glass, signs, frames].forEach((list, k) => { for (let i = mark[4 + k]; i < list.length; i++) list[i].bid = bid })
+    const mark = Object.values(L).map((l) => l.length), imark = Object.values(I).map((l) => l.length)
+    const ctx = { L, I, nav, rand, style, seed: bid * 7 + (b.floors || 2) }
+    if (b.kind === 'venue') buildVenue(b, ctx)
+    else if (b.kind === 'residential') buildResidential(b, ctx)
+    else if (b.kind === 'block') buildOffice(b, ctx)
+    else buildShop(b, ctx)
+    // 这一栋新增的所有几何体 / 实例统一打上编号
+    Object.values(L).forEach((list, k) => { for (let i = mark[k]; i < list.length; i++) tag(list[i], bid) })
+    Object.values(I).forEach((list, k) => { for (let i = imark[k]; i < list.length; i++) list[i].bid = bid })
   })
 
-  const mat = (color, extra = {}) => hideable(new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...extra }))
-  const addMerged = (geos, material, name, cast = true) => {
+  const addMerged = (geos, material, name, { cast = true, keepUV = false } = {}) => {
     if (!geos.length) return null
-    const mesh = withShadowHiding(new THREE.Mesh(mergeGeometries(geos.map(stripUV), false), material))
+    const mesh = withShadowHiding(new THREE.Mesh(mergeGeometries(keepUV ? geos : geos.map(stripUV), false), material))
     mesh.name = name
     mesh.castShadow = cast
     mesh.receiveShadow = true
@@ -112,51 +94,312 @@ export function buildBuildings(scene, nav, rand, style) {
     geos.forEach((g) => g.dispose())
     return mesh
   }
-  addMerged(walls, mat(style.wall), 'walls')
-  addMerged(trims, mat(style.trim), 'trims')
-  const roofMat = mat(style.roof)
-  roofMat.map = roofTexture(scene.angle || 0)
-  // 屋面贴图按世界坐标平铺（ShapeGeometry 的 uv 就是原始 xy）
-  const roofMesh = roofs.length ? new THREE.Mesh(mergeGeometries(roofs, false), roofMat) : null
-  if (roofMesh) { roofMesh.receiveShadow = true; roofMesh.name = 'roofs'; group.add(roofMesh) }
+  addMerged(L.solid, hideable(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.86 })), 'walls')
+  addMerged(L.glassy, hideable(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.16, metalness: 0.35 })), 'curtainWalls')
+  const roofMat = hideable(new THREE.MeshStandardMaterial({ color: style.roof, roughness: 0.85 }))
+  roofMat.map = roofTexture(scene.angle || 0) // 屋面贴图按世界坐标平铺（ShapeGeometry 的 uv 就是原始 xy）
+  addMerged(L.roofs, roofMat, 'roofs', { cast: false, keepUV: true })
+  addMerged(L.pitch, hideable(new THREE.MeshStandardMaterial({ color: '#86b574', roughness: 1 })), 'pitch', { cast: false })
+  const heatGeometry = L.heat.length ? mergeGeometries(L.heat.map(stripUV), false) : null
 
-  if (extras.pitch.length) addMerged(extras.pitch, mat('#86b574', { roughness: 1 }), 'pitch', false)
-  if (extras.venueGlass.length) addMerged(extras.venueGlass, mat('#9cc3dc', { roughness: 0.12, metalness: 0.35 }), 'venueGlass', false)
-
-  const heatGeometry = heatRoofs.length ? mergeGeometries(heatRoofs.map(stripUV), false) : null
-
-  group.add(instancedBoxes(glass, hideable(new THREE.MeshStandardMaterial({ roughness: 0.18, metalness: 0.15 })), 'glass', false))
-  group.add(instancedBoxes(signs, hideable(new THREE.MeshStandardMaterial({ roughness: 0.7 })), 'signs', true))
-  group.add(instancedBoxes(frames, hideable(new THREE.MeshStandardMaterial({ roughness: 0.8 })), 'frames', false))
+  group.add(instancedBoxes(I.glass, hideable(new THREE.MeshStandardMaterial({ roughness: 0.18, metalness: 0.15 })), 'glass', false))
+  group.add(instancedBoxes(I.signs, hideable(new THREE.MeshStandardMaterial({ roughness: 0.7 })), 'signs', true))
+  group.add(instancedBoxes(I.details, hideable(new THREE.MeshStandardMaterial({ roughness: 0.8 })), 'details', true))
   return { group, heatGeometry }
 }
 
+// ---------------------------------------------------------------------------
+// 通用构件
+// ---------------------------------------------------------------------------
+/** 轮廓拉伸成一段棱柱（y0 起、高 h），圆角 */
+function prism(list, poly, holes, y0, h, color, r = CORNER_R) {
+  const g = toGround(new THREE.ExtrudeGeometry(makeShape(roundPolygon(poly, r), holes.map((x) => roundPolygon(x, 0.8))), { depth: h, bevelEnabled: false, curveSegments: 1 }), y0)
+  list.push(paint(g, color))
+  return g
+}
+
+/** 屋顶: 挑檐 + 女儿墙 + 带分缝的屋面 +（可选）热力层 */
+function roofCap(ctx, poly, holes, y, trimColor, heat = true, r = CORNER_R) {
+  const { L } = ctx
+  const outer = offsetPolygon(poly, 0.4) || poly
+  const inner = offsetPolygon(poly, -0.55)
+  const outerR = roundPolygon(outer, r + 0.4)
+  const ok = inner && Math.abs(signedArea(inner)) > Math.abs(signedArea(poly)) * 0.4
+  const rHoles = holes.map((x) => roundPolygon(x, 0.8))
+  if (!ok) { // 轮廓太碎，内缩失败 → 退化成一块带倒角的屋面板
+    L.solid.push(paint(toGround(new THREE.ExtrudeGeometry(makeShape(outerR, rHoles), { depth: 0.5, bevelEnabled: true, bevelSize: 0.12, bevelThickness: 0.12, bevelSegments: 2, curveSegments: 1 }), y - 0.1), trimColor))
+    if (heat) L.heat.push(toGround(new THREE.ShapeGeometry(makeShape(roundPolygon(poly, r), rHoles)), y + 0.6))
+    return
+  }
+  const innerR = roundPolygon(inner, Math.max(0.3, r - 0.55))
+  const innerHoles = holes.map((x) => roundPolygon(offsetPolygon(x, 0.4) || x, 0.8)) // 内院: 女儿墙环也要避开
+  L.solid.push(paint(toGround(new THREE.ExtrudeGeometry(makeShape(outerR, [innerR]), { depth: 1.0, bevelEnabled: true, bevelSize: 0.12, bevelThickness: 0.12, bevelSegments: 2, curveSegments: 1 }), y - 0.45), trimColor))
+  L.roofs.push(toGround(new THREE.ShapeGeometry(makeShape(innerR, innerHoles)), y + 0.02))
+  if (heat) L.heat.push(toGround(new THREE.ShapeGeometry(makeShape(innerR, innerHoles)), y + 0.1))
+  for (const ih of holes) {
+    const ring = offsetPolygon(ih, 0.9)
+    if (ring) L.solid.push(paint(toGround(new THREE.ExtrudeGeometry(makeShape(roundPolygon(ring, 1.0), [roundPolygon(offsetPolygon(ih, 0.4) || ih, 0.8)]), { depth: 1.0, bevelEnabled: false }), y - 0.45), trimColor))
+  }
+}
+
+/** 内缩 d 米；缩没了 / 缩坏了返回 null */
+function setback(poly, d) {
+  const p = offsetPolygon(poly, -d)
+  return p && Math.abs(signedArea(p)) > Math.abs(signedArea(poly)) * 0.25 ? p : null
+}
+
 /**
- * 场馆造型。只用到轮廓（绕形心缩放得到一圈圈同心环）和场馆类型:
+ * 沿轮廓的每条边走一遍，回调里拿到一个 place(list, 沿边位置 s, 中心高度, 宽, 高, 厚, 外伸, 颜色, 俯仰) 的放置函数。
+ * 盒子的局部 X 沿墙、Z 朝外。minLen: 短于它的边跳过。
+ */
+function eachEdge(poly, minLen, fn, corner = CORNER_R) {
+  const area = signedArea(poly), up = new THREE.Vector3(0, 1, 0)
+  const n = poly.length
+  for (let i = 0; i < n; i++) {
+    const p = poly[i], p1 = poly[(i + 1) % n]
+    const ex = p1[0] - p[0], ey = p1[1] - p[1], len = Math.hypot(ex, ey)
+    const usable = len - 2 * (corner + 0.3)
+    if (usable < minLen) continue
+    const [nx, ny] = edgeNormal(poly, i, area)
+    const tx = ex / len, ty = ey / len
+    const q = new THREE.Quaternion().setFromAxisAngle(up, Math.atan2(-ty, tx))
+    // 局部 Z 是不是真的朝外: 绕 Y 转 θ 后局部 Z = (sinθ, 0, cosθ) = (-ty, 0, tx)；和外法线反向时，俯仰要反过来
+    const zSign = -ty * nx + tx * ny >= 0 ? 1 : -1
+    const place = (list, s, yMid, w, h, depth, out, color, tilt = 0) => {
+      const quat = tilt ? q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), tilt * zSign)) : q
+      list.push({ pos: [p[0] + tx * s + nx * out, yMid, p[1] + ty * s + ny * out], quat, scale: [w, h, depth], color })
+    }
+    fn({ i, len, usable, start: corner + 0.3, mid: [(p[0] + p1[0]) / 2, (p[1] + p1[1]) / 2], normal: [nx, ny], place })
+  }
+}
+
+/** 每层一条窗带（核心区以外、或者不需要细分开间的立面都用它） */
+function windowBands(ctx, poly, y0, floors, floorH, color, { sill = 1.0, height = 1.6, minLen = 3.5, from = 0 } = {}) {
+  eachEdge(poly, minLen, (e) => {
+    for (let f = from; f < floors; f++) e.place(ctx.I.glass, e.start + e.usable / 2, y0 + f * floorH + sill + height / 2, e.usable, height, 0.1, 0.03, color)
+  })
+}
+
+/** 屋顶上随机放一两个设备间，位置挑离边界最远的点 */
+function roofProps(ctx, b, poly, y, color) {
+  const area = Math.abs(signedArea(poly))
+  if (area < 250) return
+  const holes = poly === b.polygon ? b.holes || [] : []
+  const cand = interiorPoints(poly, holes, 40, ctx.rand)
+    .map((p) => ({ p, d: Math.min(distToPolygonEdge(p[0], p[1], poly), ...holes.map((hh) => distToPolygonEdge(p[0], p[1], hh))) }))
+    .sort((a, c) => c.d - a.d)
+  const used = []
+  for (const c of cand) {
+    if (used.length >= (area > 1500 ? 2 : 1) || c.d < 4) break
+    if (used.some((u) => Math.hypot(u[0] - c.p[0], u[1] - c.p[1]) < 14)) continue
+    used.push(c.p)
+    const w = Math.min(c.d * 0.9, 5 + ctx.rand() * 6), d = Math.min(c.d * 0.9, 4 + ctx.rand() * 5), hh = 1.6 + ctx.rand() * 1.6
+    const g = new THREE.BoxGeometry(w, hh, d).toNonIndexed()
+    g.rotateY(-(b.angle || 0))
+    g.translate(c.p[0], y + hh / 2, c.p[1])
+    ctx.L.solid.push(paint(g, color))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 住宅
+// ---------------------------------------------------------------------------
+function buildResidential(b, ctx) {
+  const { L, I, seed } = ctx
+  const fh = FLOOR_H.residential, floors = b.floors || 11, holes = b.holes || []
+  const wall = pick(RESI_WALL, seed), accent = pick(RESI_ACCENT, seed >> 1), base = '#b7b2a8'
+  const type = ['slab', 'penthouse', 'slab', 'point'][seed % 4]
+  const top = type === 'penthouse' ? setback(b.polygon, 2.6) : null
+  const bodyFloors = top ? floors - 2 : floors
+  const h = bodyFloors * fh
+
+  prism(L.solid, b.polygon, holes, 0, 3.4, base) // 底层: 深一点的石材基座
+  prism(L.solid, b.polygon, holes, 3.4, h - 3.4, wall)
+  if (top) {
+    prism(L.solid, top, [], h, 2 * fh, accent, 1.0)
+    roofCap(ctx, top, [], h + 2 * fh, '#eceef1', true, 1.0)
+    roofCap(ctx, b.polygon, holes, h, '#eceef1', false) // 退台形成的露台
+    windowBands(ctx, top, h, 2, fh, '#9fb3c4')
+  } else roofCap(ctx, b.polygon, holes, h, '#eceef1')
+  roofProps(ctx, b, top || b.polygon, (top ? floors : bodyFloors) * fh, wall)
+
+  // 长边 = 正立面: 一侧做阳台，另一侧做楼梯间竖条；短边（山墙）只开一列小窗
+  let longest = 0
+  eachEdge(b.polygon, 0, (e) => (longest = Math.max(longest, e.len)))
+  let side = 0
+  eachEdge(b.polygon, 3, (e) => {
+    const isLong = e.len > longest * 0.6 && type !== 'point'
+    if (!isLong) { // 山墙 / 点式楼
+      for (let f = 1; f < bodyFloors; f++) e.place(I.glass, e.start + e.usable / 2, f * fh + 1.7, Math.min(e.usable, type === 'point' ? e.usable : 2.4), 1.4, 0.1, 0.03, '#9fb3c4')
+      if (type === 'point') e.place(I.details, e.start + e.usable / 2, h / 2 + 1, 2.4, h - 2, 0.5, 0.25, accent) // 点式楼每面中间一道竖向色带
+      return
+    }
+    side++
+    for (let f = 1; f < bodyFloors; f++) e.place(I.glass, e.start + e.usable / 2, f * fh + 1.75, e.usable, 1.5, 0.1, 0.03, '#9fb3c4')
+    if (side % 2 === 1) { // 阳台面: 每层一道挑板 + 栏板
+      for (let f = 1; f < bodyFloors; f++) {
+        e.place(I.details, e.start + e.usable / 2, f * fh + 0.08, e.usable - 1, 0.16, 1.3, 0.65, '#f3f1ec')
+        e.place(I.details, e.start + e.usable / 2, f * fh + 0.62, e.usable - 1, 1.0, 0.1, 1.28, accent)
+      }
+    } else { // 背面: 楼梯间竖条，高出屋面一点
+      const cores = Math.max(1, Math.round(e.usable / 22))
+      for (let k = 0; k < cores; k++) e.place(I.details, e.start + (e.usable * (k + 0.5)) / cores, (h + 2.2) / 2, 3.4, h + 2.2, 0.7, 0.35, accent)
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 写字楼
+// ---------------------------------------------------------------------------
+function buildOffice(b, ctx) {
+  const { L, I, seed } = ctx
+  const fh = FLOOR_H.block, floors = b.floors || 8, holes = b.holes || []
+  const h = floors * fh
+  const glassCol = pick(OFFICE_GLASS, seed), stone = pick(OFFICE_STONE, seed >> 1)
+  const type = ['curtain', 'grid', 'stepped', 'curtain', 'grid'][seed % 5]
+
+  if (type === 'curtain') { // 玻璃幕墙塔楼: 整个体量是玻璃，竖向肋 + 每 4 层一道腰线 + 塔冠
+    prism(L.glassy, b.polygon, holes, 0, h, glassCol)
+    prism(L.solid, b.polygon, holes, 0, 0.9, '#8a9099') // 勒脚
+    const crown = setback(b.polygon, 1.2)
+    if (crown) { prism(L.solid, crown, [], h, 2.6, '#e6e9ed', 1.0); roofCap(ctx, crown, [], h + 2.6, '#eceef1', true, 1.0) } else roofCap(ctx, b.polygon, holes, h, '#eceef1')
+    eachEdge(b.polygon, 3, (e) => {
+      const fins = Math.max(2, Math.round(e.usable / 3.2))
+      for (let k = 0; k <= fins; k++) e.place(I.details, e.start + (e.usable * k) / fins, h / 2 + 0.4, 0.16, h - 0.8, 0.4, 0.2, '#e9edf1')
+      for (let f = 4; f < floors; f += 4) e.place(I.details, e.start + e.usable / 2, f * fh, e.usable, 0.35, 0.3, 0.12, '#dfe4ea')
+    })
+    if (floors >= 14 && seed % 2 === 0) { // 高的那几栋顶上加一根桅杆
+      const c = interiorPoints(crown || b.polygon, [], 1, ctx.rand)[0]
+      if (c) { const g = new THREE.BoxGeometry(0.5, 14, 0.5).toNonIndexed(); g.translate(c[0], h + 2.6 + 7, c[1]); L.solid.push(paint(g, '#c9ced5')) }
+    }
+    return
+  }
+
+  if (type === 'stepped') { // 逐级收分: 下 55% 满铺，中段内缩 3m，顶段再缩 3m
+    const tiers = [{ poly: b.polygon, holes, to: Math.round(floors * 0.55) }]
+    const mid = setback(b.polygon, 3), topP = mid && setback(mid, 3)
+    if (mid) tiers.push({ poly: mid, holes: [], to: Math.round(floors * 0.85) })
+    if (topP) tiers.push({ poly: topP, holes: [], to: floors })
+    tiers[tiers.length - 1].to = floors
+    let f0 = 0
+    tiers.forEach((t, k) => {
+      const y0 = f0 * fh, th = (t.to - f0) * fh
+      if (th <= 0) return
+      prism(k % 2 ? L.glassy : L.solid, t.poly, t.holes, y0, th, k % 2 ? glassCol : stone, k ? 1.0 : CORNER_R)
+      if (k % 2 === 0) windowBands(ctx, t.poly, y0, t.to - f0, fh, '#8fa6ba', { height: 2.0, from: k ? 0 : 0 })
+      else eachEdge(t.poly, 3, (e) => { const fins = Math.max(2, Math.round(e.usable / 3.2)); for (let j = 0; j <= fins; j++) e.place(I.details, e.start + (e.usable * j) / fins, y0 + th / 2, 0.16, th, 0.4, 0.2, '#e9edf1') }, 1.0)
+      roofCap(ctx, t.poly, t.holes, y0 + th, '#eceef1', k === tiers.length - 1, k ? 1.0 : CORNER_R)
+      f0 = t.to
+    })
+    roofProps(ctx, b, tiers[tiers.length - 1].poly, h, stone)
+    return
+  }
+
+  // grid: 两层裙房（外扩 2.5m，深色石材，大玻璃）+ 石材塔身、逐层窗带
+  const podium = offsetPolygon(b.polygon, 2.5)
+  const ph = 2 * fh + 0.6
+  if (podium) {
+    prism(L.solid, podium, [], 0, ph, '#9aa0a8')
+    roofCap(ctx, podium, [], ph, '#d5d9de', false)
+    eachEdge(podium, 3.5, (e) => e.place(I.glass, e.start + e.usable / 2, ph / 2 - 0.2, e.usable, ph - 2.4, 0.12, 0.04, '#7f9db8'))
+  }
+  prism(L.solid, b.polygon, holes, 0, h, stone)
+  windowBands(ctx, b.polygon, 0, floors, fh, '#8fa6ba', { height: 2.1, from: podium ? 2 : 0 })
+  eachEdge(b.polygon, 3, (e) => { // 竖向壁柱把窗带分成格
+    const cols = Math.max(2, Math.round(e.usable / 6))
+    for (let k = 0; k <= cols; k++) e.place(I.details, e.start + (e.usable * k) / cols, (h + ph) / 2, 0.5, h - ph, 0.3, 0.15, stone)
+  })
+  roofCap(ctx, b.polygon, holes, h, '#eceef1')
+  roofProps(ctx, b, b.polygon, h, stone)
+}
+
+// ---------------------------------------------------------------------------
+// 商业
+// ---------------------------------------------------------------------------
+function buildShop(b, ctx) {
+  const { L, I, nav, rand, seed } = ctx
+  const fh = FLOOR_H.shop, floors = b.floors || 2, holes = b.holes || []
+  const h = floors * fh
+  const area = Math.abs(signedArea(b.polygon))
+  const isMall = area > 2200
+  const wall = pick(MALL_WALL, seed), accent = pick(MALL_ACCENT, seed >> 1)
+
+  prism(L.solid, b.polygon, holes, 0, h, wall)
+  roofCap(ctx, b.polygon, holes, h, '#eceef1')
+  roofProps(ctx, b, b.polygon, h, wall)
+
+  let theme = SHOP_THEMES[(rand() * SHOP_THEMES.length) | 0], themeLeft = 0
+  let portal = null // 最长的那条临街边，商场的入口门头放这儿
+  eachEdge(b.polygon, 3.5, (e) => {
+    const [nx, ny] = e.normal
+    const far = !nav.contains(e.mid[0], e.mid[1]) // 核心区以外: 不知道哪面临街，也没人走近看，统一画窗带
+    const frontage = nav.isWalkable(e.mid[0] + nx * 2.5, e.mid[1] + ny * 2.5) || nav.isWalkable(e.mid[0] + nx * 4, e.mid[1] + ny * 4)
+    if (far || !frontage) {
+      if (far) for (let f = 0; f < floors; f++) e.place(I.glass, e.start + e.usable / 2, f * fh + 2.3, e.usable, 1.9, 0.1, 0.03, '#93a9bd')
+      return
+    }
+    if (!portal || e.len > portal.len) portal = e
+    const bays = Math.max(1, Math.round(e.usable / 6)), bw = e.usable / bays
+    for (let k = 0; k < bays; k++) {
+      if (themeLeft <= 0) { theme = SHOP_THEMES[(rand() * SHOP_THEMES.length) | 0]; themeLeft = 1 + ((rand() * 3) | 0) }
+      themeLeft--
+      const s = e.start + bw * (k + 0.5)
+      e.place(I.glass, s, 1.85, bw - 0.5, 3.0, 0.12, 0.04, theme[0])
+      e.place(I.signs, s, 3.85, bw - 0.25, 0.8, 0.3, 0.1, isMall ? accent : theme[1])
+      e.place(I.details, s - bw / 2, 2.1, 0.32, 4.2, 0.22, 0.06, '#aeb3ba')
+      if (k === bays - 1) e.place(I.details, s + bw / 2, 2.1, 0.32, 4.2, 0.22, 0.06, '#aeb3ba')
+      if (!isMall) e.place(I.details, s, 3.25, bw - 0.6, 0.08, 1.5, 0.8, pick(AWNING, seed + k), -0.32) // 小商铺: 斜挑的遮阳篷
+    }
+    for (let f = 1; f < floors; f++) e.place(I.glass, e.start + e.usable / 2, f * fh + 2.1, e.usable, 1.3, 0.1, 0.03, '#9fb3c4')
+    if (isMall) e.place(I.details, e.start + e.usable / 2, h - 0.9, e.usable, 0.5, 0.2, 0.1, accent) // 商场: 檐下一道通长的品牌色带
+  })
+
+  if (isMall && portal) { // 入口门头: 比檐口高出一截的门框 + 通高玻璃
+    const w = Math.min(14, portal.usable * 0.4)
+    portal.place(I.details, portal.start + portal.usable / 2, (h + 2.6) / 2, w, h + 2.6, 1.6, 0.8, accent)
+    portal.place(I.glass, portal.start + portal.usable / 2, (h + 0.6) / 2, w - 2.2, h - 0.6, 0.2, 1.62, '#9cc3dc')
+  }
+  if (isMall) { // 屋顶采光天窗: 沿街区主方向的一条玻璃长廊
+    const c = interiorPoints(b.polygon, holes, 30, rand).map((p) => ({ p, d: Math.min(distToPolygonEdge(p[0], p[1], b.polygon), ...holes.map((x) => distToPolygonEdge(p[0], p[1], x))) })).sort((a, z) => z.d - a.d)[0]
+    if (c && c.d > 9) {
+      const len = c.d * 1.5, g = new THREE.BoxGeometry(len, 2.2, 5).toNonIndexed()
+      g.rotateY(-(b.angle || 0) + (seed % 2 ? Math.PI / 2 : 0))
+      g.translate(c.p[0], h + 1.4, c.p[1])
+      L.glassy.push(paint(g, '#a9cbe0'))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 场馆
+// ---------------------------------------------------------------------------
+/**
+ * 只用到轮廓（绕形心缩放得到一圈圈同心环）和场馆类型:
  *   stadium  外墙一圈 + 逐级下降的阶梯看台 + 中间草坪 + 顶上一圈挑出的环形罩棚
  *   其他     基座 + 椭球形壳体 + 一条贯穿壳体的玻璃幕带（剧院 / 音乐厅常见的样子）
  * 屋顶热力层: 体育场铺在罩棚上，剧院直接贴着壳体。
  */
-function buildVenue(b, walls, trims, heatRoofs, extras) {
+function buildVenue(b, ctx) {
+  const { L } = ctx
   const poly = b.polygon
   let cx = 0, cy = 0
   for (const [x, y] of poly) { cx += x; cy += y }
   cx /= poly.length
   cy /= poly.length
   const ring = (k) => poly.map(([x, y]) => [cx + (x - cx) * k, cy + (y - cy) * k])
-  const annulus = (k0, k1, depth, y) => toGround(new THREE.ExtrudeGeometry(makeShape(ring(k0), k1 > 0 ? [ring(k1)] : []), { depth, bevelEnabled: false, curveSegments: 1 }), y)
+  const annulus = (k0, k1, depth, y, color) => paint(toGround(new THREE.ExtrudeGeometry(makeShape(ring(k0), k1 > 0 ? [ring(k1)] : []), { depth, bevelEnabled: false, curveSegments: 1 }), y), color)
 
   if (b.venue?.type === 'stadium') {
     const H = 25
-    walls.push(annulus(1, 0.9, H, 0))
+    L.solid.push(annulus(1, 0.9, H, 0, '#cfd3d8'))
     const N = 9
-    for (let i = 0; i < N; i++) { // 看台: 从外圈 22m 高逐级降到场边 3m
+    for (let i = 0; i < N; i++) { // 看台: 从外圈 22m 高逐级降到场边 3m，隔一级换个深浅
       const k0 = 0.9 - (i * 0.4) / N, k1 = 0.9 - ((i + 1) * 0.4) / N
-      trims.push(annulus(k0, k1, 22 - (i * 19) / N, 0))
+      L.solid.push(annulus(k0, k1, 22 - (i * 19) / N, 0, i % 2 ? '#dfe3e8' : '#c7ccd3'))
     }
-    extras.pitch.push(toGround(new THREE.ShapeGeometry(makeShape(ring(0.5))), 0.4))
-    trims.push(annulus(1.06, 0.68, 1.3, H + 1.2)) // 环形罩棚，向场内挑出
-    heatRoofs.push(toGround(new THREE.ShapeGeometry(makeShape(ring(1.06), [ring(0.68)])), H + 2.6))
+    L.pitch.push(toGround(new THREE.ShapeGeometry(makeShape(ring(0.5))), 0.4))
+    L.solid.push(annulus(1.06, 0.68, 1.3, H + 1.2, '#f1f3f5')) // 环形罩棚，向场内挑出
+    L.heat.push(toGround(new THREE.ShapeGeometry(makeShape(ring(1.06), [ring(0.68)])), H + 2.6))
     return
   }
 
@@ -167,8 +410,8 @@ function buildVenue(b, walls, trims, heatRoofs, extras) {
   let rx = 1, ry = 1
   for (const [x, y] of poly) { rx = Math.max(rx, Math.abs((x - cx) * ca + (y - cy) * sa)); ry = Math.max(ry, Math.abs(-(x - cx) * sa + (y - cy) * ca)) }
   const BASE = 4.5, DOME = Math.min(22, Math.min(rx, ry) * 0.62)
-  walls.push(annulus(1, 0, BASE, 0))
-  trims.push(annulus(1.07, 0, 0.7, 0)) // 基座外的一圈台阶
+  L.solid.push(annulus(1, 0, BASE, 0, '#cfd3d8'))
+  L.solid.push(annulus(1.07, 0, 0.7, 0, '#e6e9ed')) // 基座外的一圈台阶
   const shell = (kx, ky, kz) => {
     const g = new THREE.SphereGeometry(1, 40, 18, 0, Math.PI * 2, 0, Math.PI / 2)
     g.scale(rx * kx, DOME * ky, ry * kz)
@@ -176,11 +419,12 @@ function buildVenue(b, walls, trims, heatRoofs, extras) {
     g.translate(cx, BASE, cy)
     return g
   }
-  trims.push(shell(0.93, 1, 0.93).toNonIndexed())
-  extras.venueGlass.push(shell(0.3, 1.012, 0.945).toNonIndexed()) // 玻璃幕带: 一条更窄但略高的壳，从主壳里「露」出来
-  heatRoofs.push(shell(0.945, 1.03, 0.96))
+  L.solid.push(paint(shell(0.93, 1, 0.93).toNonIndexed(), '#e9ecef'))
+  L.glassy.push(paint(shell(0.3, 1.012, 0.945).toNonIndexed(), '#9cc3dc')) // 玻璃幕带: 一条更窄但略高的壳，从主壳里「露」出来
+  L.heat.push(shell(0.945, 1.03, 0.96))
 }
 
+// ---------------------------------------------------------------------------
 function stripUV(g) {
   g.deleteAttribute('uv')
   return g
@@ -189,12 +433,12 @@ function stripUV(g) {
 function roofTexture(angle) {
   const cv = document.createElement('canvas')
   cv.width = cv.height = 128
-  const ctx = cv.getContext('2d')
-  ctx.fillStyle = '#fff'
-  ctx.fillRect(0, 0, 128, 128)
-  ctx.strokeStyle = 'rgba(120,128,138,0.55)'
-  ctx.lineWidth = 2
-  ctx.strokeRect(0, 0, 128, 128)
+  const c2 = cv.getContext('2d')
+  c2.fillStyle = '#fff'
+  c2.fillRect(0, 0, 128, 128)
+  c2.strokeStyle = 'rgba(120,128,138,0.55)'
+  c2.lineWidth = 2
+  c2.strokeRect(0, 0, 128, 128)
   const tex = new THREE.CanvasTexture(cv)
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping
   tex.repeat.set(1 / 9, 1 / 9) // 9m 一格的屋面分缝
@@ -202,84 +446,6 @@ function roofTexture(angle) {
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 4
   return tex
-}
-
-/** 临街边: 法线外侧 2.5m 处可行走。店面只做在这些边上。 */
-function addFacades(b, h, nav, rand, glass, signs, frames) {
-  const poly = b.polygon
-  const area = signedArea(poly)
-  const up = new THREE.Vector3(0, 1, 0)
-  const q = new THREE.Quaternion()
-  const n = poly.length
-  const isShop = b.kind === 'shop'
-  let theme = SHOP_THEMES[(rand() * SHOP_THEMES.length) | 0]
-  let themeLeft = 0
-
-  for (let i = 0; i < n; i++) {
-    const p = poly[i], p1 = poly[(i + 1) % n]
-    const ex = p1[0] - p[0], ey = p1[1] - p[1]
-    const L = Math.hypot(ex, ey)
-    const usable = L - 2 * (CORNER_R + 0.3)
-    if (usable < 3.5) continue
-    const [nx, ny] = edgeNormal(poly, i, area)
-    const mx = (p[0] + p1[0]) / 2, my = (p[1] + p1[1]) / 2
-    const frontage = nav.isWalkable(mx + nx * 2.5, my + ny * 2.5) || nav.isWalkable(mx + nx * 4, my + ny * 4)
-    const far = !nav.contains(mx, my) // 核心区以外: 不知道哪面临街，也没人走近看，统一画窗带
-    const tx = ex / L, ty = ey / L
-    // 盒子的局部 X 沿墙、Z 朝外
-    q.setFromAxisAngle(up, Math.atan2(-ty, tx))
-    const place = (list, s, yMid, w, hh, depth, out, color) => {
-      const cx = p[0] + tx * s + nx * out, cz = p[1] + ty * s + ny * out
-      list.push({ pos: [cx, yMid, cz], quat: q.clone(), scale: [w, hh, depth], color })
-    }
-    const start = CORNER_R + 0.3
-
-    if (isShop && frontage) {
-      const bays = Math.max(1, Math.round(usable / 6))
-      const bw = usable / bays
-      for (let k = 0; k < bays; k++) {
-        if (themeLeft <= 0) {
-          theme = SHOP_THEMES[(rand() * SHOP_THEMES.length) | 0]
-          themeLeft = 1 + ((rand() * 3) | 0)
-        }
-        themeLeft--
-        const s = start + bw * (k + 0.5)
-        place(glass, s, 1.85, bw - 0.5, 3.0, 0.12, 0.04, theme[0])
-        place(signs, s, 3.85, bw - 0.25, 0.8, 0.3, 0.1, theme[1])
-        place(frames, s - bw / 2, 2.1, 0.32, 4.2, 0.22, 0.06, '#aeb3ba')
-        if (k === bays - 1) place(frames, s + bw / 2, 2.1, 0.32, 4.2, 0.22, 0.06, '#aeb3ba')
-      }
-      // 二层及以上: 一条窄窗带
-      for (let f = 1; f < (b.floors || 2); f++) {
-        place(glass, start + usable / 2, f * FLOOR_H + 2.1, usable, 1.3, 0.1, 0.03, '#9fb3c4')
-      }
-    } else if (!isShop || far) {
-      for (let f = 0; f < (b.floors || 2); f++) {
-        place(glass, start + usable / 2, f * FLOOR_H + 2.3, usable, 1.9, 0.1, 0.03, '#93a9bd')
-      }
-    }
-  }
-}
-
-/** 屋顶上随机放一两个设备间，位置挑离边界最远的点 */
-function addRoofProps(b, h, rand, out) {
-  const area = Math.abs(signedArea(b.polygon))
-  if (area < 250) return
-  const count = area > 1500 ? 2 : 1
-  const cand = interiorPoints(b.polygon, b.holes || [], 40, rand)
-    .map((p) => ({ p, d: Math.min(distToPolygonEdge(p[0], p[1], b.polygon), ...(b.holes || []).map((hh) => distToPolygonEdge(p[0], p[1], hh))) }))
-    .sort((a, c) => c.d - a.d)
-  const used = []
-  for (const c of cand) {
-    if (used.length >= count || c.d < 5) break
-    if (used.some((u) => Math.hypot(u[0] - c.p[0], u[1] - c.p[1]) < 14)) continue
-    used.push(c.p)
-    const w = Math.min(c.d * 0.9, 5 + rand() * 6), d = Math.min(c.d * 0.9, 4 + rand() * 5), hh = 1.6 + rand() * 1.6
-    const g = new THREE.BoxGeometry(w, hh, d).toNonIndexed()
-    g.rotateY(-(b.angle || 0))
-    g.translate(c.p[0], h + hh / 2, c.p[1])
-    out.push(g)
-  }
 }
 
 function instancedBoxes(items, material, name, castShadow) {
