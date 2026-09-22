@@ -118,7 +118,7 @@ function poll(id) {
     <div v-if="job" class="bar"><i :style="{ width: pct + '%' }"></i><span>{{ job.stage }} {{ pct }}%</span></div>
     <!-- 完成后的摘要: 尺寸、分辨率、建筑数（用了哪种识别方法）、OSM 道路数、用时 -->
     <p v-if="job?.summary" class="hint">
-      {{ job.summary.width }}×{{ job.summary.height }} 像素 · {{ job.summary.mpp }} m/px · 建筑 {{ job.summary.buildings }} 栋（{{ { roofnet: '分割网络', sam: 'SAM', color: '颜色' }[job.summary.method] }}）
+      {{ job.summary.width }}×{{ job.summary.height }} 像素 · {{ job.summary.mpp }} m/px · 建筑 {{ job.summary.buildings }} 栋（{{ { roofnet: '分割网络', 'roofnet+sam': '分割网络 + SAM 高楼', sam: 'SAM', color: '颜色' }[job.summary.method] }}）
       <!-- 取了 OSM 才显示道路条数 -->
       <template v-if="job.summary.osm_roads !== undefined"> · OSM 道路 {{ job.summary.osm_roads }} 条</template> · {{ job.summary.seconds }} 秒
     </p>

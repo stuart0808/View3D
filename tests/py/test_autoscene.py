@@ -31,6 +31,11 @@ CID = autoscene.CID
 # autoscene
 # ---------------------------------------------------------------------------
 def test_default_floors():
+    """没有影子 / OSM 层数时按占地面积猜层数
+
+    小房子是独栋民房（3 层），中等的是多层住宅（6 层），特别大的多半是厂房仓库（2 层）；
+    商铺一律 2 层。
+    """
     assert autoscene.default_floors(120, "residential") == 3  # 独栋民房
     assert autoscene.default_floors(600, "residential") == 6  # 多层住宅
     assert autoscene.default_floors(3000, "residential") == 2  # 厂房 / 仓库
@@ -38,6 +43,11 @@ def test_default_floors():
 
 
 def test_square_pixels():
+    """经纬度网格的图东西向要乘 cos(纬度) 才是正方形像素
+
+    北纬 60° 时东西向像素只有南北向一半长，宽度应该缩到一半、dlon 翻倍；
+    没有地理参考或者在赤道上时原图原样返回（同一个对象，不复制）。
+    """
     img = np.zeros((100, 200, 3), np.uint8)
     geo = {"type": "lonlat", "lon0": 121.0, "lat0": 60.0, "dlon": 1e-5, "dlat": 1e-5}  # 北纬 60°: 东西向像素只有一半长
     out, g = autoscene.square_pixels(img, geo)
@@ -48,6 +58,11 @@ def test_square_pixels():
 
 
 def test_build_labels_osm_priority_and_roads():
+    """标签图拼接: OSM 建筑优先、路压在楼上时抠掉楼、水道画成水
+
+    图像识别的楼和 OSM 那栋重叠就丢掉（OSM 的轮廓和层数更可靠）；
+    压在路上的那部分建筑像素让给路，剩下的仍是住宅；最终层数一栋来自 OSM、一栋按面积。
+    """
     img = np.full((200, 200, 3), 150, np.uint8)
     feats = {k: [] for k in ("roads", "water", "green", "park", "parking", "plaza", "buildings", "waterways")}
     feats["roads"].append(dict(pts=np.array([[0.0, 100.0], [200.0, 100.0]]), cls="residential", width_m=6, oneway=False, elevated=False))
@@ -66,12 +81,19 @@ def test_build_labels_osm_priority_and_roads():
 
 
 def _rect(x0, y0, x1, y1, shape=(200, 200)):
+    """shape 大小的布尔图上画一个 [x0, x1) × [y0, y1) 的实心矩形
+    """
     m = np.zeros(shape, bool)
     m[y0:y1, x0:x1] = True
     return m
 
 
 def test_run_pipeline_color_fallback(tmp_path):
+    """整条流水线（颜色兜底方法，不需要权重、不联网）
+
+    检查: 至少识别出两栋楼；场景 JSON 带底图信息（米为单位的宽高）；
+    底图和预览图都写出来了；进度回调从「读图」开始到「完成」结束；不给比例尺报 ValueError。
+    """
     img = np.full((300, 400, 3), (60, 130, 60), np.uint8)  # 绿地底
     img[40:100, 40:140] = (180, 180, 190)  # 两栋浅色屋顶
     img[160:240, 220:340] = (170, 175, 185)
@@ -92,6 +114,8 @@ def test_run_pipeline_color_fallback(tmp_path):
 # roofnet（不需要权重的部分）
 # ---------------------------------------------------------------------------
 def test_model_forward_shape():
+    """屋顶网络能前向，输出和输入同样大小（96×128 不是 32 的倍数也行）
+    """
     torch = pytest.importorskip("torch")
     m = roofnet.build_model(pretrained=False).eval()
     with torch.no_grad():
@@ -100,6 +124,10 @@ def test_model_forward_shape():
 
 
 def test_augment_shapes_and_labels():
+    """训练增广: 输出裁成指定尺寸，标签只剩 0 / 1 / 2 三个值
+
+    缩放、旋转用最近邻插值，不能插出 0.5 这种不存在的类别。
+    """
     import random
     img = np.random.default_rng(0).integers(0, 255, (300, 280, 3), np.uint8)
     mask = np.zeros((300, 280), np.uint8)
@@ -111,6 +139,10 @@ def test_augment_shapes_and_labels():
 
 
 def test_instances_splits_touching_buildings():
+    """概率图 → 单栋: 一条连着的屋顶被中间的边界拆成两栋
+
+    两栋的左上角 x 一个是 20，另一个在边界附近；全零的概率图返回空列表。
+    """
     pb = np.zeros((100, 160), np.float32)
     pe = np.zeros_like(pb)
     pb[20:60, 20:140] = 0.9  # 一整条连着的屋顶
@@ -127,6 +159,12 @@ def test_instances_splits_touching_buildings():
 # sat_server
 # ---------------------------------------------------------------------------
 def test_server_make_job_and_index(tmp_path, monkeypatch):
+    """导入服务: 参数校验、建 job、场景索引
+
+    米/像素模式和网络截图模式都能建 job，参考层数能透传；
+    场景名带路径、没有比例尺（又不是 GeoTIFF）都拒绝；
+    索引跳过 *_sidecar.json，只列真正的场景。
+    """
     import sat_server as sv
     monkeypatch.setattr(sv, "OUT", tmp_path)
     q = {"name": ["ok_1"], "mpp": ["0.3"]}
@@ -153,6 +191,10 @@ def test_server_make_job_and_index(tmp_path, monkeypatch):
 # 评测 / 下载
 # ---------------------------------------------------------------------------
 def test_eval_score():
+    """评测指标: 一个命中、一个误报、一个漏检 → 精确率 / 召回率都是 0.5
+
+    hits 按预测顺序标出哪些命中，画评测图时用。
+    """
     inst = np.zeros((50, 100), np.int32)
     inst[10:30, 10:30] = 1
     inst[10:30, 60:90] = 2
@@ -164,6 +206,8 @@ def test_eval_score():
 
 
 def test_stretch_16bit():
+    """16 位卫星图拉伸到 8 位: 两端百分位映射到 0 和 255
+    """
     a = np.zeros((10, 10, 3), np.uint16)
     a[..., :] = np.linspace(300, 700, 100).reshape(10, 10, 1).astype(np.uint16)
     out = fs.stretch(a)
@@ -171,6 +215,10 @@ def test_stretch_16bit():
 
 
 def test_tile_origin_parses_geotiff_header(monkeypatch):
+    """只读 GeoTIFF 文件头就能拿到左上角经纬度和像素大小
+
+    下载时用 HTTP Range 只取头部几 KB，这里用假的 http 函数返回整个内存文件。
+    """
     tifffile = pytest.importorskip("tifffile")
     buf = io.BytesIO()
     tifffile.imwrite(buf, np.zeros((8, 8, 3), np.uint16), extratags=[
@@ -181,6 +229,8 @@ def test_tile_origin_parses_geotiff_header(monkeypatch):
 
 
 def test_clean_roads_keeps_long_strips_only():
+    """网络识别的路要清理: 被车遮断的短缺口连上，孤立的小块丢掉
+    """
     prob = np.zeros((200, 300), np.float32)
     prob[95:105, :] = 0.9  # 一条 300 像素长的路
     prob[95:105, 140:143] = 0.1  # 被一辆车遮断 3 像素
@@ -191,6 +241,10 @@ def test_clean_roads_keeps_long_strips_only():
 
 
 def test_build_labels_uses_image_roads_only_without_osm():
+    """图像识别的路只在没有 OSM 路网时使用，而且不切楼
+
+    网络常把高楼立面误认成路，所以楼优先；OSM 路网够用时完全不用图像的路。
+    """
     img = np.full((200, 200, 3), 150, np.uint8)
     roads = np.zeros((200, 200), bool)
     roads[95:105, :] = True
@@ -205,6 +259,11 @@ def test_build_labels_uses_image_roads_only_without_osm():
 
 
 def test_three_channel_training_inherits_two_channel_weights(tmp_path, monkeypatch):
+    """第二版（3 通道，加道路）从第一版（2 通道）权重继承着训练
+
+    造两张建筑瓦片和两张道路瓦片，训练 2 步:
+      新权重是 3 通道；前两个输出通道和旧权重接近；predict 返回 3 张概率图。
+    """
     torch = pytest.importorskip("torch")
     bdir, rdir = tmp_path / "b", tmp_path / "r"
     bdir.mkdir(); rdir.mkdir()
@@ -236,6 +295,10 @@ def test_three_channel_training_inherits_two_channel_weights(tmp_path, monkeypat
 
 
 def test_merge_sam_prefers_whole_towers():
+    """高层场景合并: SAM 的整栋塔楼替换网络的碎屋顶，网络独有的小楼保留
+
+    SAM 只盖住小楼一半的那块算重复，不再加一栋。
+    """
     shape = (100, 100)
     tower = sg.crop(_rect(10, 10, 50, 40, shape))  # SAM: 整栋塔楼
     frag = sg.crop(_rect(15, 15, 30, 25, shape))  # 网络: 塔楼上的一块碎屋顶
@@ -246,6 +309,10 @@ def test_merge_sam_prefers_whole_towers():
 
 
 def test_tall_scene_detection():
+    """高层场景判定: 要有明显的楼影暗峰（够多、够大的黑块）
+
+    亮地面没有暗峰 → 不是；加上 12 块大楼影 → 是。
+    """
     rng = np.random.default_rng(0)
     img = rng.integers(120, 200, (400, 400, 3)).astype(np.uint8)  # 亮地面，没有暗峰
     assert not autoscene.tall_scene(img, 0.5)
@@ -253,3 +320,16 @@ def test_tall_scene_detection():
         y, x = 20 + (k // 4) * 120, 20 + (k % 4) * 95
         img[y:y + 60, x:x + 40] = 20
     assert autoscene.tall_scene(img, 0.5)
+
+
+def test_fill_tall_uses_median_for_hidden_big_towers():
+    """高层场景里估不出层数的大楼取同片中位数，小楼仍留给按面积的默认值
+
+    三栋估出来的楼 10 / 20 / 30 层（中位数 20）；一栋 50×50 像素 × 0.5 m = 625㎡ 的大楼没估出 → 20 层；
+    一栋 10×10 像素 = 25㎡ 的小房子没估出 → 仍是 None。一栋都没估出时原样返回。
+    """
+    big = sg.crop(_rect(0, 0, 50, 50, (100, 100)))  # 625㎡
+    small = sg.crop(_rect(60, 60, 70, 70, (100, 100)))  # 25㎡
+    got = autoscene.fill_tall([10, 20, 30, None, None], [big, big, big, big, small], 0.5)
+    assert got == [10, 20, 30, 20, None]
+    assert autoscene.fill_tall([None, None], [big, small], 0.5) == [None, None]

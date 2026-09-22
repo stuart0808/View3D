@@ -320,6 +320,29 @@ def build_labels(img, mpp, bld_crops, feats=None, img_roads=None, bld_floors=Non
     return lab, blds
 
 
+def fill_tall(floors, crops, mpp, min_m2=300.0):
+    """高层场景: 影子被邻楼挡住、估不出层数的大楼，按同一片估出来的中位数补上
+
+    不补的话这些楼会掉回「按面积」的默认 6 层，夹在一片 20 多层的塔楼中间很突兀。
+    小房子（< min_m2）多半是裙房 / 门卫室，照旧留给按面积的默认值。
+
+    Args:
+        floors: auto_heights 的结果，每栋一个层数或 None（估不出）
+        crops: 同顺序的 (x0, y0, 掩码) 裁剪块
+        mpp: 米/像素，用来把像素面积换成平方米
+        min_m2: 多大的楼才补
+
+    Returns:
+        list: 新的层数列表；一栋都没估出来时原样返回（没有中位数可用）
+    """
+    known = [f for f in floors if f]
+    if not known:
+        return list(floors)
+    med = int(np.median(known))  # 同一片楼的典型层数
+    # 估出来的保持不变；估不出的大楼给中位数，小楼仍是 None
+    return [f if f else (med if c[2].sum() * mpp * mpp >= min_m2 else None) for f, c in zip(floors, crops)]
+
+
 def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progress=None, work_dir=None, ref_floors=None, sun_elev=50.0):
     """
     全流程。progress(阶段名, 0~1 进度) 回调给服务端显示。
@@ -363,7 +386,14 @@ def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progre
     img_roads = clean_roads(road_prob, mpp) if road_prob is not None else None  # 网络识别的路面（第二版才有）
     # 影子估层数: 方向自动找，长度 ↔ 高度按太阳高度角（默认 50°）；给了参考层数就按它定整体比例
     say("估算楼高", 0.56)
-    bld_floors, hinfo = sg.auto_heights(crops, img, mpp, sun_elev_deg=sun_elev, ref_floors=ref_floors) if crops else ([], {})
+    # 高层场景（叠加过 SAM）又没给参考层数: 默认按 18 层定比例 —— 自动模式估不了倾斜、太阳高度角也只是猜，
+    # 绝对高度常低一半以上；国内高层住宅多在 18~33 层，取偏保守的 18，影子只负责各栋之间的相对高矮
+    eff_ref = ref_floors or (18 if used == "roofnet+sam" else None)
+    bld_floors, hinfo = sg.auto_heights(crops, img, mpp, sun_elev_deg=sun_elev, ref_floors=eff_ref) if crops else ([], {})
+    if eff_ref and not ref_floors:
+        hinfo["default_ref_floors"] = eff_ref
+    if used == "roofnet+sam":
+        bld_floors = fill_tall(bld_floors, crops, mpp)
     summary["heights"] = hinfo
     summary.update(method=used, detected=len(crops), image_roads=img_roads is not None)
 
