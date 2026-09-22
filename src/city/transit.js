@@ -1,6 +1,12 @@
 // 轨道交通: 地铁（地下，用「透视叠加」的方式画线路/车站/列车）和铁路（高架桥，实体）。
 // 列车按时刻表发车: 两类交通各有「工作日 / 节假日」两套时刻表，由仿真时钟决定用哪一套、此刻的发车间隔是多少。
 // 核心区里的车站有出入口: 列车到站时乘客成批涌出，人群也会把车站当作离开的出口。
+//
+// 数据来源: scene.transit.lines（脚本从 sidecar 换算成米）: { id, name, kind: 'metro'|'rail', color, loop, points, stations }
+// 运行模型: 每条线两个方向各自按发车间隔从端点放车（环线从 s=0 起），列车沿折线按弧长前进，
+//   到站减速停 dwell 秒再走，到末端消失。没有信号闭塞，只靠间隔保证不追尾。
+// 画法: 地铁在地下 → 线路、站点圆环、列车都用不做深度测试的材质「透过地面」显示；
+//   铁路是实体高架桥（桥面 / 桥墩 / 钢轨），列车是实体盒子。车站模型见 stations.js。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { CURB_H } from './ground.js'
@@ -23,11 +29,13 @@ export const TIMETABLES = {
   },
 }
 
+/** 两类列车的运行参数: 最高速 (m/s)、加速度、停站时长 (s)、编组节数、每节长度、车厢宽高（米） */
 const SPEC = {
   metro: { vmax: 17, accel: 1.0, dwell: 35, cars: 6, carLen: 19, width: 3.0, height: 3.4 },
   rail: { vmax: 30, accel: 0.6, dwell: 120, cars: 8, carLen: 25, width: 3.3, height: 3.9 },
 }
 
+/** 某类交通在某套时刻表的某个时刻的发车间隔（分钟），0 = 停运。取「起始小时 ≤ hour」的最后一行 */
 export function headwayAt(kind, timetable, hour, tables = TIMETABLES) {
   let h = 0
   for (const [from, gap] of tables[kind][timetable]) if (hour >= from) h = gap
@@ -35,6 +43,10 @@ export function headwayAt(kind, timetable, hour, tables = TIMETABLES) {
 }
 
 export class Transit {
+  /**
+   * @param nav    导航网格，车站出入口要落在人行道上
+   * @param clock  仿真时钟: 决定用哪套时刻表、此刻的间隔；跳时间时重新铺车
+   */
   constructor(scene, nav, clock, { timetables = TIMETABLES } = {}) {
     this.clock = clock
     this.tables = timetables
@@ -43,7 +55,7 @@ export class Transit {
     this.lines = (scene.transit?.lines || []).map((l) => this.#prepareLine(l))
     this.buildings = scene.buildings || [] // 站前广场选边要看建筑
     this.trains = []
-    this.onArrive = null // (stationName, line) => void
+    this.onArrive = null // (stationName, line) => void，引擎挂上去让人群从车站涌出
     this.#buildStations(nav)
     this.#buildTrack()
     this.#buildTrainMeshes()
@@ -51,6 +63,7 @@ export class Transit {
     this.#populate()
   }
 
+  /** 线路预处理: 环线首尾相接；算折线累计弧长 cum；每个车站投影到线上得到弧长位置 s，按 s 排序 */
   #prepareLine(l) {
     const pts = l.loop ? [...l.points, l.points[0]] : l.points
     const cum = [0]
@@ -144,6 +157,7 @@ export class Transit {
     this.group.add(buildStationMeshes(stationLayouts(this.stations, this.buildings)))
   }
 
+  /** 两类列车各一个 InstancedMesh（最多 600 节车厢），地铁用透视材质 */
   #buildTrainMeshes() {
     this.meshes = {}
     for (const kind of ['metro', 'rail']) {
@@ -168,8 +182,10 @@ export class Transit {
   // -------------------------------------------------------------------------
   // 运行
   // -------------------------------------------------------------------------
+  /** 这条线此刻的发车间隔（秒） */
   #headway(line) { return headwayAt(line.kind, this.clock.timetable, this.clock.hour, this.tables) * 60 }
 
+  /** 在弧长 s 处放一列车。dir=1 沿点序、-1 反向；stops 按行驶方向排好，idx 指向下一个要停的站 */
   #spawn(line, dir, s) {
     const stops = dir === 1 ? line.stops : [...line.stops].reverse()
     const idx = stops.findIndex((q) => (dir === 1 ? q.s > s + 1 : q.s < s - 1))
@@ -188,6 +204,7 @@ export class Transit {
     }
   }
 
+  /** 推进 dt 仿真秒: 到点发车 → 每列车加减速 / 停站 / 到站回调 → 出线的车删掉 → 写实例矩阵 */
   update(dt, write = true) {
     const now = this.clock.t / 1000
     for (const line of this.lines) {
@@ -199,7 +216,8 @@ export class Transit {
     }
     for (const t of this.trains) {
       const sp = t.line.spec
-      if (t.dwell > 0) { t.dwell -= dt; continue }
+      if (t.dwell > 0) { t.dwell -= dt; continue } // 停站中
+      // 目标速度: 离下一站还有 toStop 米时，按 v² = 2·a·s 的刹车曲线限速，停站前刚好减到 0
       const stop = t.stops[t.idx]
       const toStop = stop ? Math.abs(stop.s - t.s) : Infinity
       const want = Math.min(sp.vmax, Math.sqrt(2 * sp.accel * Math.max(0, toStop - 0.5)) + 0.4)
@@ -218,6 +236,7 @@ export class Transit {
     if (write) this.#write()
   }
 
+  /** 把每列车的每节车厢写成一个实例: 沿线路弧长倒推每节的位置和朝向；环线取模，非环线出线的车厢不画 */
   #write() {
     const count = { metro: 0, rail: 0 }
     const col = new THREE.Color()
@@ -246,6 +265,7 @@ export class Transit {
     }
   }
 
+  /** 给界面: 各线在途列车数、当前时刻表、各线发车间隔（分钟） */
   stats() {
     const by = {}
     for (const t of this.trains) by[t.line.id] = (by[t.line.id] || 0) + 1
@@ -258,6 +278,7 @@ export class Transit {
   }
 }
 
+/** 折线上弧长 s 处的点和切向 */
 function sample(pts, cum, s) {
   let i = 1
   while (i < cum.length - 1 && cum[i] < s) i++
@@ -266,6 +287,7 @@ function sample(pts, cum, s) {
   return { x: a[0] + (b[0] - a[0]) * t, y: a[1] + (b[1] - a[1]) * t, dx: (b[0] - a[0]) / l, dy: (b[1] - a[1]) / l }
 }
 
+/** 点 p 投影到折线上，返回最近点的弧长 */
 function project(pts, cum, p) {
   let best = Infinity, bs = 0
   for (let i = 1; i < pts.length; i++) {
