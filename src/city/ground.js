@@ -1,11 +1,25 @@
-// 地块底座、路面、人行铺装、车道线/斑马线，以及四周雾化的背景楼块。
+// 地面层: 地块底座、路面、人行铺装、面状区域、路面标线、高架桥体，以及四周雾化的背景楼块。
+//
+// 分层思路（从下到上）:
+//   底座 slab      整个地块的一块厚板（-1.6m 起），让街区像「托盘」一样浮在背景上
+//   路面 road      地块顶面整体铺深色 = 车行道；不单独画每条路，人行铺装盖上去之后剩下的就是路，天然无缝
+//   铺装 pavement  人行道 / 街区内部，抬高 CURB_H 形成路沿
+//   区域 areas     绿化 / 公园 / 广场是盖在铺装上的薄板；水体、停车场在脚本里已从铺装挖掉，铺在路面标高
+//   标线 markings  车道线、中心线、斑马线、停车位线，一个 InstancedMesh；中央隔离带、桥下隔离带另建
+//   高架 elevated  桥面 / 护栏 / 桥墩，标高 ELEVATED_H
+// 所有几何体按材质合并，整层十几个 draw call。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { makeShape, toGround, signedArea, edgeNormal } from './geometry.js'
 import { laneLayout, hasMedian, ELEVATED_H } from './roads.js'
 
-export const CURB_H = 0.18
+export const CURB_H = 0.18 // 路沿高度（米）: 人行铺装比路面高这么多，行人和路灯、树都立在这个标高上
 
+/**
+ * @param parkingLines  停车位线（Traffic 排好车位后给的，画进标线层）
+ * @param railGaps      高架护栏要留缺口的折线（匝道并线段）
+ * @param islands       匝道岛（匝道坡体下方 + 空置的匝道车道），并进桥下隔离带
+ */
 export function buildGround(scene, style, parkingLines = [], railGaps = [], islands = []) {
   const group = new THREE.Group()
   group.name = 'ground'
@@ -51,6 +65,7 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
   return group
 }
 
+/** 铺装分缝贴图: 一张只有边框的小方块，按世界坐标每 size 米重复一次，并转到街区主方向 */
 function tileTexture(angle, size = 2.4) {
   const cv = document.createElement('canvas')
   cv.width = cv.height = 64
@@ -108,9 +123,10 @@ function buildAreas(scene, style) {
  *   同向车道之间白虚线；单行路（环岛）只有车道分隔线；高架上的线抬到桥面标高。
  */
 function buildMarkings(scene, style, parkingLines, islands = []) {
-  const items = [] // [x, z, angle, length, width, color, y]
-  const medians = [], underDeck = []
-  const DASH = 3, GAP = 4.5
+  const items = [] // 每条标线一个实例: [x, z, angle, length, width, color, y]
+  const medians = [], underDeck = [] // 要另建实体隔离带的路段
+  const DASH = 3, GAP = 4.5 // 虚线: 3m 线 + 4.5m 空，国标的 4:6 近似
+  // 沿折线画一条线: off 是相对中心线向右的偏移（右 = (-ty, tx)），dashed 决定虚实，carry 让虚线跨拐点连续
   const stroke = (pts, off, width, color, dashed, y) => {
     let carry = 0
     for (let i = 0; i + 1 < pts.length; i++) {
@@ -159,6 +175,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
 
   const group = new THREE.Group()
   group.name = 'markings'
+  // 单位平面 → 每个实例用缩放矩阵拉成 length x width 的条，贴在路面上方 2.5cm 免得和路面打架
   const geo = new THREE.PlaneGeometry(1, 1)
   geo.rotateX(-Math.PI / 2)
   const mesh = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.9 }), Math.max(1, items.length))
@@ -220,6 +237,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
   return group
 }
 
+/** 点到折线的最短距离（护栏留缺口用） */
 function distToPolyline(x, y, pts) {
   let best = Infinity
   for (let i = 0; i + 1 < pts.length; i++) {
@@ -231,7 +249,10 @@ function distToPolyline(x, y, pts) {
   return best
 }
 
-/** 高架: 桥面板 + 两侧护栏 + 桥墩。车和标线由别处抬到 ELEVATED_H */
+/**
+ * 高架: 桥面板（0.9m 厚，顶面 = ELEVATED_H）+ 两侧护栏（沿轮廓 3m 一段，匝道并线处留缺口）+ 桥墩（沿中心线每 28m 一根）。
+ * 车和标线由别处抬到 ELEVATED_H。环形高架的轮廓带孔，内外两圈都要护栏。
+ */
 export function buildElevated(scene, style, railGaps = []) {
   const group = new THREE.Group()
   group.name = 'elevated'
@@ -261,6 +282,7 @@ export function buildElevated(scene, style, railGaps = []) {
     }
     }
   }
+  // 桥墩: 沿高架中心线每 28m 一根，第一根离路段起点 14m
   for (const lane of scene.lanes || []) {
     if (!lane.level) continue
     let acc = 14
@@ -299,8 +321,8 @@ export function buildBackdrop(scene, style, rand) {
   const ang = scene.angle || 0
   const ca = Math.cos(ang), sa = Math.sin(ang)
   const bg = new THREE.Color(style.background), tint = new THREE.Color(style.backdrop)
-  const step = Math.min(240, Math.max(70, R * 0.55)) // 场景再大，背景楼块也保持楼的尺度
-  const range = Math.ceil((R * 3.4) / step)
+  const step = Math.min(240, Math.max(70, R * 0.55)) // 楼块网格间距: 场景再大，背景楼块也保持楼的尺度
+  const range = Math.ceil((R * 3.4) / step) // 铺到 3.4 倍场景半径远
   const geos = []
   const col = new THREE.Color()
 
@@ -309,16 +331,17 @@ export function buildBackdrop(scene, style, rand) {
       // 在旋转后的网格上摆放，和街区朝向一致
       const lx = (gi + (rand() - 0.5) * 0.35) * step, ly = (gj + (rand() - 0.5) * 0.35) * step
       const inner = R * 0.95 + step * 0.55
-      if (Math.abs(lx) < inner && Math.abs(ly) < inner) continue
+      if (Math.abs(lx) < inner && Math.abs(ly) < inner) continue // 场景本身的范围留空
       const dist = Math.hypot(lx, ly)
       if (dist > R * 3.4 || rand() < 0.22) continue
       const w = step * (0.4 + rand() * 0.32), d = step * (0.4 + rand() * 0.32), h = 30 + rand() * rand() * 140
-      const fade = THREE.MathUtils.smoothstep(dist, R * 1.0, R * 3.2) * 0.75 + 0.18
+      const fade = THREE.MathUtils.smoothstep(dist, R * 1.0, R * 3.2) * 0.75 + 0.18 // 越远越往背景色混（假雾）
 
       const g = new THREE.BoxGeometry(w, h, d).toNonIndexed()
       const pos = g.attributes.position, nor = g.attributes.normal
       const colors = new Float32Array(pos.count * 3)
       for (let v = 0; v < pos.count; v++) {
+        // 顶面最亮，各侧面略有明暗差，才有体积感（MeshBasicMaterial 不受光照，明暗全靠顶点色）
         const shade = nor.getY(v) > 0.5 ? 1.0 : nor.getX(v) > 0.5 ? 0.9 : nor.getZ(v) > 0.5 ? 0.82 : 0.86
         const t = (pos.getY(v) + h / 2) / h // 0 底 → 1 顶
         col.copy(tint).multiplyScalar(shade).lerp(bg, fade)

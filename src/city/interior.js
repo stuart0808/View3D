@@ -3,16 +3,26 @@
 //          走廊里的人数 = 人群仿真里此刻「在这栋楼里」的人数，是活的。
 //   garage 地下车库 B1: 车位、车道、柱网、坡道；停着的车数 = 车流仿真里这个车库此刻的占用数。
 // 同样不追求还原真实室内，只保证和建筑轮廓、出入口、实时数据对得上。
+//
+// 显示方式: 引擎把这栋楼的 bid 写进 hiddenBuilding（buildings.js），楼体、热力层在着色器里被隐藏；
+// 这里在原地 y=0 起建一层室内，镜头推近。退出时整组销毁，楼体恢复。
+// 内部坐标: 二维 (x, y) → 世界 (x, 高度, y)，与别处一致。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { signedArea, edgeNormal, offsetPolygon, pointInPolygon, interiorPoints, distToPolygonEdge, makeShape, toGround } from './geometry.js'
 import { layoutParking, carGeometry, carMaterial, CAR_COLORS } from './props.js'
 import { personGeometry, PEOPLE_PALETTE } from './crowd.js'
 
-const SHOP_FLOORS = ['#f3d9c4', '#d6e6f2', '#e3ecd2', '#f1e3b8', '#e6d8ee', '#d3ebe6', '#f4d4d4']
-const WALL_H = 1.5
+const SHOP_FLOORS = ['#f3d9c4', '#d6e6f2', '#e3ecd2', '#f1e3b8', '#e6d8ee', '#d3ebe6', '#f4d4d4'] // 每家店铺地面随机一种淡色，一眼分得出店和店
+const WALL_H = 1.5 // 室内墙只做 1.5m 高: 等轴测俯视时不挡视线，又看得出分隔
 
 export class Interior {
+  /**
+   * @param building  scene.json 里的建筑（polygon / holes / id）
+   * @param kind      'mall' | 'garage'
+   * @param angle     街区主方向，车库的车位沿它排
+   * @param garage    Traffic.garageInfo() 的结果 { entry, normal, capacity, occupied }，车库坡道要用出入口位置
+   */
   constructor(building, kind, { rand, angle = 0, garage = null }) {
     this.b = building
     this.kind = kind
@@ -24,6 +34,7 @@ export class Interior {
     else this.#buildMall()
   }
 
+  /** 一批几何体合并成一个 Mesh 加进组里；opts: rough 粗糙度、vertexColors 用顶点色、cast 投影 */
   #mesh(geos, color, opts = {}) {
     if (!geos.length) return null
     const merged = mergeGeometries(geos.map((g) => { g.deleteAttribute('uv'); return g.index ? g.toNonIndexed() : g }))
@@ -49,9 +60,13 @@ export class Interior {
   }
 
   // -------------------------------------------------------------------------
+  /**
+   * 商场一层: 沿每条外墙边按 7m 一个开间排店铺，店铺进深 D 取楼内最宽处的一半（3.5~10m），
+   * 内侧留 5.2m 宽的环形走廊（中线 = 轮廓内缩 D + 2.6），中庭撒几个岛柜。
+   */
   #buildMall() {
     const { polygon } = this.b
-    const Y = 0.25
+    const Y = 0.25 // 楼板顶面标高
     this.#shell('#ecebe7', '#d5d8dc', 0)
 
     // 店铺进深: 取「楼内最宽处」的一部分，窄楼就浅一点
@@ -61,8 +76,8 @@ export class Interior {
     this.shopDepth = D
 
     const area = signedArea(polygon)
-    const parts = [], counters = [], tints = []
-    this.shopSpots = []
+    const parts = [], counters = [], tints = [] // 隔墙 / 收银台 / 店铺地面
+    this.shopSpots = [] // 每家店 [中心x, 中心y, 向内方向x, y, 开间宽]，室内的人要「站在店里」时用
     const n = polygon.length
     for (let i = 0; i < n; i++) {
       const p = polygon[i], q = polygon[(i + 1) % n]
@@ -71,13 +86,14 @@ export class Interior {
       const tx = (q[0] - p[0]) / L, ty = (q[1] - p[1]) / L
       const [ox, oy] = edgeNormal(polygon, i, area)
       const ix = -ox, iy = -oy // 向内
-      const bays = Math.max(1, Math.round((L - 2) / 7))
+      const bays = Math.max(1, Math.round((L - 2) / 7)) // 这条边分几个开间（两端各留 1m）
       const bw = (L - 2) / bays
       const ang = Math.atan2(-iy, ix) // 盒子局部 X 朝楼内
+      // k = 0..bays: 每个 k 放一道隔墙；k < bays 时还放这一格的店铺地面和收银台
       for (let k = 0; k <= bays; k++) {
         const s = 1 + bw * k
         const wx = p[0] + tx * s + ix * (D / 2 + 0.4), wy = p[1] + ty * s + iy * (D / 2 + 0.4)
-        if (!this.inside(wx + ix * D * 0.45, wy + iy * D * 0.45)) continue
+        if (!this.inside(wx + ix * D * 0.45, wy + iy * D * 0.45)) continue // 隔墙的内端要在楼里（凹角处会伸出去）
         const g = new THREE.BoxGeometry(D, WALL_H - 0.2, 0.18)
         g.rotateY(ang)
         g.translate(wx, Y + (WALL_H - 0.2) / 2, wy)
@@ -103,7 +119,7 @@ export class Interior {
     this.#mesh(tints, '#ffffff', { vertexColors: true, cast: false })
     this.#mesh(counters, '#b9c0c9')
 
-    // 走廊中线 = 轮廓内缩（店铺进深 + 走廊半宽）。窄楼缩不进去就退化成在楼里随机走
+    // 走廊中线 = 轮廓内缩（店铺进深 + 走廊半宽）。窄楼缩不进去就退化成在楼里随机站着
     this.loop = offsetPolygon(polygon, -(D + 2.6))
     if (this.loop && Math.abs(signedArea(this.loop)) < 30) this.loop = null
     if (this.loop) {
@@ -117,6 +133,7 @@ export class Interior {
         kiosks.push({ x: p[0], y: p[1], g })
       }
       this.#mesh(kiosks.map((k) => k.g), '#c8d3c0')
+      // 走廊折线的累计弧长，人沿它走时用来定位
       this.loopCum = [0]
       for (let i = 0; i < this.loop.length; i++) {
         const a = this.loop[i], b = this.loop[(i + 1) % this.loop.length]
@@ -125,7 +142,7 @@ export class Interior {
     }
     this.probe = probe
 
-    // 人
+    // 人: 一个 InstancedMesh，数量每帧按「楼内人数」增减
     this.capacity = 400
     this.people = new THREE.InstancedMesh(personGeometry(), new THREE.MeshStandardMaterial({ roughness: 0.8, vertexColors: true }), this.capacity)
     this.people.count = 0
@@ -138,6 +155,7 @@ export class Interior {
     this.floorY = Y
   }
 
+  /** 生成一个室内的人: 四成站在某家店里，其余沿走廊来回走（随机方向、速度、横向偏移） */
   #spawnPerson() {
     const r = this.rand
     if (this.shopSpots.length && r() < 0.4) {
@@ -152,6 +170,7 @@ export class Interior {
   }
 
   // -------------------------------------------------------------------------
+  /** 地下车库 B1: 深色楼板 + 车位 + 每隔三个车位一根柱 + 从出入口下来的坡道；车按占用率显示前 K 个车位 */
   #buildGarage(angle, garage) {
     const Y = 0.25
     this.#shell('#565b63', '#3f444b', 0)
@@ -210,7 +229,10 @@ export class Interior {
     this.group.add(this.cars)
   }
 
-  /** live: mall → 楼内人数；garage → { occupied, capacity } */
+  /**
+   * 每帧调用，dt 是仿真秒。live 是实时数据: mall → 楼内人数（crowd 里 visitors）；garage → { occupied, capacity }。
+   * 商场: 人数不够就补人、多了就砍掉末尾；走动的人沿走廊推进并写实例矩阵。车库: 只改显示的车数。
+   */
   update(dt, live) {
     if (this.kind === 'garage') {
       if (live && this.stalls.length) this.cars.count = Math.min(this.stalls.length, Math.round((live.occupied / Math.max(1, live.capacity)) * this.stalls.length))
@@ -225,7 +247,7 @@ export class Interior {
       let x = a.x, y = a.y, yaw = a.yaw, bob = 0
       if (!a.still) {
         const total = this.loopCum[this.loopCum.length - 1]
-        a.s = (((a.s + a.v * dt) % total) + total) % total
+        a.s = (((a.s + a.v * dt) % total) + total) % total // 沿环走，负速度也能回绕
         a.ph += dt * 9
         let k = 1
         while (k < this.loopCum.length - 1 && this.loopCum[k] < a.s) k++
@@ -237,6 +259,7 @@ export class Interior {
         yaw = Math.atan2(tx * Math.sign(a.v), ty * Math.sign(a.v))
         bob = Math.abs(Math.sin(a.ph)) * 0.06
       }
+      // 直接写 4x4 矩阵: 绕 Y 转 yaw、缩放 S、平移到 (x, 楼板 + 走路起伏, y)
       const c = Math.cos(yaw) * S, sn = Math.sin(yaw) * S, o = i * 16
       arr[o] = c; arr[o + 1] = 0; arr[o + 2] = -sn; arr[o + 3] = 0
       arr[o + 4] = 0; arr[o + 5] = S; arr[o + 6] = 0; arr[o + 7] = 0
