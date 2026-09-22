@@ -81,7 +81,7 @@
 - 样例数据: `tools/fetch_samples.py` 下载 SpaceNet（CC BY-SA 4.0）场景并拼接，正方形像素（经纬度网格东西向要 ×cos 纬度）
 
 ### 测试
-- pytest 88 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
+- pytest 89 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
 
 ## v0.2.0 — 2026-09-22　城区版
 
