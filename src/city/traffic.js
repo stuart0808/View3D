@@ -511,7 +511,12 @@ export class Traffic {
    */
   #plan(way) {
     // 下一条路: 从终点路口的出路里随机挑一条，不掉头（排除 twin）；路口是图边界（没有出路）就出图
-    const opts = this.nodes[way.to].out.filter((w) => w !== way.twin)
+    let opts = this.nodes[way.to].out.filter((w) => w !== way.twin)
+    // 编辑器给路口设了「禁止左转」: 去掉左转的出路；只剩左转能走（丁字路口的尽头）时仍然放行，免得车卡死
+    if (this.nodes[way.to].noLeft) {
+      const ok = opts.filter((w) => this.#moveOf(way, w) !== 'L')
+      if (ok.length) opts = ok
+    }
     const nextWay = opts.length ? opts[(this.rand() * opts.length) | 0] : null
     const move = this.#moveOf(way, nextWay)
     const n = way.n
