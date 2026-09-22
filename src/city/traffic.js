@@ -9,6 +9,13 @@
 //   · 超车: 路段中间（离路口够远）前车明显比自己慢、左侧车道有空档，就变到左侧车道超过去，拉开距离后驶回原车道；
 //     不越过中心线借对向车道，要进匝道/停车场的车不超车
 //   · 停车场和带地下车库的楼: 车会从最外侧车道拐进去停下/消失，也会定时有车开出来汇入车流
+//
+// 数据结构:
+//   way   一条路的一个行驶方向: { from, to, edge, n(车道数), laneW, lanes[], twin(对向), level, roundabout }
+//   lane  一条车道: { pts, cum, len, way, k(第几条，0 最内侧), off(距中心线), cars[](按 s 排序), crosswalks[], gates[], stopS(停车线) }
+//   car   { mode: lane|turn|ramp|path|waiting|parked, lane, s(弧长), v, x, y, dx, dy, nextPlan, parkAt, lat(变道横移), ... }
+//   node  路口: { pos, radius, degree, out[](出路), inn[](进路), busy, turning[](此刻在路口里的车) }
+// 每个子步（≤0.25s）: 补车 → 设施进出 → 逐车按 mode 更新 → 写实例矩阵。跟车用「安全刹车距离」模型: want = min(vmax, √(2·3·gap))
 import * as THREE from 'three'
 import { carGeometry, carMaterial, CAR_COLORS, layoutParking } from './props.js'
 import { SURFACE } from './navgrid.js'
@@ -18,7 +25,8 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { laneLayout, ELEVATED_H } from './roads.js'
 
 const MIN_ROAD_WIDTH = 5.5 // 比这窄的路不走车
-const CAR_LEN = 4.3
+const CAR_LEN = 4.3 // 车长（米），跟车间距和停车线都按它算
+// 速度 (m/s): 直路 7.5 ≈ 27km/h（示意用，比真实慢，画面里才看得清）、转弯 4、停车场内 2.8、匝道 5.5；加速度、刹车 (m/s²)
 const V_MAX = 7.5, V_TURN = 4, V_LOT = 2.8, V_RAMP = 5.5, ACCEL = 2.5, BRAKE = 6
 const RAMP_W = 4.4
 const LANE_CHANGE_V = 1.5 // 变道时的横移速度 (m/s)
@@ -26,6 +34,11 @@ const MERGE_LEN = 22 // 匝道到桥面标高后，并入/驶出主线的平段�
 const RAMP_LENS = [75, 60, 48] // 匝道水平长度（米），路段放得下就用长的；真实匝道更长，示例街区小，48m 时坡度约 13%
 
 export class Traffic {
+  /**
+   * @param density   目标车密度: 每米车道多少辆（1/110 ≈ 每 110m 车道一辆）
+   * @param capacity  实例上限（含停着的车）
+   * @param signals   红绿灯；null 时所有路口按「一次放一辆」
+   */
   constructor(scene, nav, rand, { density = 1 / 110, capacity = 1500, signals = null } = {}) {
     this.nav = nav
     this.rand = rand
@@ -48,6 +61,7 @@ export class Traffic {
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     this.mesh.setColorAt(0, new THREE.Color('#fff')) // 先把 instanceColor 缓冲区建出来
 
+    // 目标在途车数 = 车道总长 × 密度，封顶 400；setDemand 再按日曲线缩放
     const total = this.ways.reduce((s, w) => s + w.lanes[0].len * w.n, 0)
     this.baseTarget = Math.min(400, Math.round(total * density))
     this.target = this.baseTarget
@@ -57,6 +71,7 @@ export class Traffic {
   // -------------------------------------------------------------------------
   // 路网
   // -------------------------------------------------------------------------
+  /** roadGraph 的每条边 → 两个方向的 way，每个 way 按路宽分出车道；再把斑马线挂到各车道上、算停车线位置 */
   #buildWays(scene) {
     const g = scene.roadGraph || { nodes: {}, edges: [] }
     this.nodes = {}
@@ -277,6 +292,10 @@ export class Traffic {
   // -------------------------------------------------------------------------
   // 停车场 / 地下车库
   // -------------------------------------------------------------------------
+  /**
+   * 停车场和地下车库。每个设施找一条离它最近、且设施在其右手边的外侧车道开出入口（右进右出）；
+   * 停车场按 layoutParking 排车位并预置六成的车；面积 ≥1200㎡ 且临路的楼配地下车库（只记占用数，不画车位）
+   */
   #buildFacilities(scene) {
     this.facilities = []
     const outerLanes = this.lanes.filter((l) => l.k === l.way.n - 1)
@@ -391,6 +410,7 @@ export class Traffic {
   // -------------------------------------------------------------------------
   // 车
   // -------------------------------------------------------------------------
+  /** 新车: 两成慢车（vmax 0.5~0.65 倍）才会出现超车 */
   #newCar() {
     const car = {
       id: (this.carSeq = (this.carSeq || 0) + 1), mode: 'lane', lane: null, s: 0, v: 0, level: 0, move: 'S', rtor: false, x: 0, y: 0, dx: 1, dy: 0, scale: 1, wait: 0, push: 0, nextWay: null, nextPlan: null, parkAt: null,
@@ -403,6 +423,7 @@ export class Traffic {
     return car
   }
 
+  /** 车出图 / 进车库: 从列表删掉，颜色缓冲要重写 */
   #remove(car) {
     const i = this.cars.indexOf(car)
     if (i >= 0) this.cars.splice(i, 1)
@@ -442,6 +463,10 @@ export class Traffic {
     return { lane: way.lanes[k], nextWay, move }
   }
 
+  /**
+   * 车进入一条车道（从路口出来、从匝道下来、从设施出来、开场铺车）。
+   * 顺带决定: 要不要在这条路上拐进某个停车场 / 车库（三成概率，路上车多时七成）、要不要走匝道下桥
+   */
   #enterLane(car, lane, nextWay, s = 0, ramp = null) {
     car.takeRamp = ramp || (lane.offRamp && lane.offRamp.eFrom > s + 5 && this.rand() < 0.45 ? lane.offRamp : null)
     car.h = undefined
@@ -478,6 +503,7 @@ export class Traffic {
     samplePolyline(lane.pts, lane.cum, s, car)
   }
 
+  /** 开场铺车: 随机车道随机位置，彼此至少隔 12m */
   #seed() {
     let guard = this.target * 20, n = 0
     while (n < this.target && guard-- > 0 && this.ways.length) {
@@ -495,6 +521,7 @@ export class Traffic {
   /** 车流强度 0~1（来自仿真时钟的日曲线）。目标车数降下来后，多出来的车会更愿意拐进停车场/车库或开出图外 */
   setDemand(f) { this.target = Math.round(this.baseTarget * Math.max(0.12, f)) }
 
+  /** 在途车数（车道上 / 路口里 / 匝道上），每个子步只数一次 */
   get roadCount() {
     if (this._rc >= 0) return this._rc
     let n = 0
@@ -527,6 +554,11 @@ export class Traffic {
     if (write) this.#write()
   }
 
+  /**
+   * 车道上行驶。把所有「前方障碍」折算成一个 gap（到障碍的距离），再按刹车曲线定目标速度:
+   *   前车 / 斑马线上的行人 / 路中的行人 / 匝道口 / 路口（红灯、轨迹冲突、目标车道入口有车、环岛让行）
+   * car.why 记下是谁限制了它（调试和统计用）。到车道尽头 → 转弯或出图；到匝道口 / 出入口 → 离开车道
+   */
   #updateLane(car, dt) {
     const lane = car.lane
     // 前方最近的障碍: 前车 / 有行人的斑马线 / 红灯 / 进不去的路口
@@ -744,6 +776,7 @@ export class Traffic {
     return false
   }
 
+  /** 进路口: 取缓存的转弯轨迹，登记到路口的 turning 列表 */
   #startTurn(car) {
     const a = car.lane, b = car.nextPlan.lane
     const path = this.#turnPath(a, b)
@@ -753,6 +786,10 @@ export class Traffic {
     this.nodes[a.way.to].turning.push(car)
   }
 
+  /**
+   * 路口内行驶（沿二次贝塞尔曲线）。让行顺序: 出口斑马线上的行人 → 目标车道入口的车 → 并入同一出口的车（按剩余距离排队）
+   * → 前方 7m 内次序靠前的其他转弯车。被车挡住永远不硬挤；只有等行人超过 6 秒才缓慢通过
+   */
   #updateTurn(car, dt) {
     const t = car.turn
     let want = car.move === 'S' ? Math.min(car.vmax, 6.5) : V_TURN // 直行过路口不用降到转弯速度
@@ -825,6 +862,7 @@ export class Traffic {
     return this.nodes[nodeId].turning.some((c) => c.turn.fromRing)
   }
 
+  /** 匝道上行驶: 沿匝道折线（带高度）前进，跟前车；到尽头等目标车道有空档再汇入，下桥后优先直行 */
   #updateRamp(car, dt) {
     const { r } = car.ramp
     const target = r.type === 'on' ? r.eLane : r.sLane
@@ -862,6 +900,7 @@ export class Traffic {
     car.slope = (b[2] - a[2]) / l
   }
 
+  /** 进入「沿固定折线走」模式（停车场内、车库坡道） */
   #startPath(car, pts, extra) {
     const cum = cumulative(pts)
     car.mode = 'path'
@@ -876,6 +915,7 @@ export class Traffic {
     this.#startPath(car, [[car.x, car.y], ...[...out].reverse().slice(1)], { arriving: true, fac, stall })
   }
 
+  /** 设施出车: 每个出入口隔 40~140s 放一辆（停车场随机挑一辆倒车出位，车库凭空生成一辆）；出口有车在等就先等主路空档 */
   #updateFacilities(dt) {
     for (const f of this.facilities) {
       if (!f.gate) continue
@@ -913,6 +953,7 @@ export class Traffic {
     }
   }
 
+  /** 沿折线走: 压过人行道时让行人；倒车段车头保持朝里；车库门洞处缩放淡入淡出；到头后停进车位或消失进车库 */
   #updatePath(car, dt) {
     const p = car.path
     const reversing = p.reverseUntil > p.s
@@ -949,6 +990,7 @@ export class Traffic {
     }
   }
 
+  /** 写实例矩阵: 朝向来自 (dx, dy)，匝道上带俯仰和高度，变道中加横向偏移；颜色只在增删车后重写 */
   #write() {
     const arr = this.mesh.instanceMatrix.array
     const n = Math.min(this.cars.length, this.capacity)
@@ -982,27 +1024,34 @@ export class Traffic {
 }
 
 // ---------------------------------------------------------------------------
+// 折线 / 几何小工具
+// ---------------------------------------------------------------------------
+/** 单位化 */
 function norm(x, y) {
   const l = Math.hypot(x, y) || 1
   return [x / l, y / l]
 }
 
+/** 折线第 i 个顶点处的方向（用相邻两点） */
 function dirAt(pts, i) {
   const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, Math.max(1, i))]
   return norm(b[0] - a[0], b[1] - a[1])
 }
 
+/** 二次贝塞尔 */
 function bezier(a, b, c, t) {
   const v = 1 - t
   return [v * v * a[0] + 2 * v * t * b[0] + t * t * c[0], v * v * a[1] + 2 * v * t * b[1] + t * t * c[1]]
 }
 
+/** 折线累计弧长 */
 function cumulative(pts) {
   const cum = [0]
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]))
   return cum
 }
 
+/** 折线弧长 s 处的点和切向，写进 out（复用对象，避免分配） */
 function samplePolyline(pts, cum, s, out) {
   let i = 1
   while (i < cum.length - 1 && cum[i] < s) i++
@@ -1015,6 +1064,7 @@ function samplePolyline(pts, cum, s, out) {
   return out
 }
 
+/** 截取弧长 [s0, s1] 的子折线 */
 function slicePolyline(pts, cum, s0, s1) {
   const tmp = {}
   const out = []
@@ -1024,6 +1074,7 @@ function slicePolyline(pts, cum, s0, s1) {
   return out
 }
 
+/** 点到折线的最近点: 返回 { dist, s(弧长) } */
 function projectOnPolyline(pts, cum, x, y) {
   let best = { dist: Infinity, s: 0 }
   for (let i = 1; i < pts.length; i++) {
@@ -1036,12 +1087,14 @@ function projectOnPolyline(pts, cum, x, y) {
   return best
 }
 
+/** 多边形顶点的平均（形心的近似） */
 function centroid(poly) {
   let x = 0, y = 0
   for (const p of poly) { x += p[0]; y += p[1] }
   return [x / poly.length, y / poly.length]
 }
 
+/** 多边形边界上离 p 最近的点 */
 function nearestOnPolygon(poly, p) {
   let best = null, bd = Infinity
   for (let i = 0; i < poly.length; i++) {
@@ -1054,6 +1107,7 @@ function nearestOnPolygon(poly, p) {
   return best
 }
 
+/** 去掉折线里挨得太近的重复点 */
 function dedupe(pts) {
   return pts.filter((p, i) => i === 0 || Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 0.4)
 }
