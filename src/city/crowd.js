@@ -1,5 +1,15 @@
-// 人群: 出入口生成 → 逛几家店（进门、停留、出门）→ 从出入口离开。
-// 这是「示意性」仿真: 后端只需给聚合量（总人数、各建筑吸引力），小人的具体路径由前端生成。
+// 人群仿真。
+//
+// 每个人是一个状态机: WALK（沿距离场走向目的地）→ ENTER（缩小、进门）→ INSIDE（在楼里，计时）→ EXIT（出门）→ WALK …
+// 或者 IDLE（在公园 / 广场歇脚）；走到出入口 / 回到家 = FREE（离开仿真）。
+// 数据全部是平铺的类型化数组（SoA），几千人每帧更新也只有几毫秒；渲染是一个 InstancedMesh。
+//
+// 目的地（dests）三种: door（一栋楼，含它所有的门，共用一张距离场）、portal（人流出入口 / 车站出入口）、spot（歇脚点）。
+// 「去哪」由需求模型（demand.js）按人群和时段决定；没有需求模型时退回「随机逛几家店再离开」。
+// 这是「示意性」仿真: 后端只需给聚合量（总人数、各建筑吸引力、人群曲线），小人的具体路径由前端生成。
+//
+// 运动: 目标方向 = 距离场的下坡方向 + 每人固定的横向偏移（铺满人行道）；加上邻居的分离力（哈希网格找邻居）；
+// 一阶低通得到速度；撞墙时沿墙滑。红灯时正要踏上斑马线的人停下。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { UNREACHABLE, SURFACE } from './navgrid.js'
@@ -7,9 +17,11 @@ import { signedArea, interiorPoints } from './geometry.js'
 import { CURB_H } from './ground.js'
 import { GROUPS } from './demand.js'
 
-const FREE = 0, WALK = 1, ENTER = 2, INSIDE = 3, EXIT = 4, IDLE = 5 // IDLE: 在公园/广场里站着歇会儿
+const FREE = 0, WALK = 1, ENTER = 2, INSIDE = 3, EXIT = 4, IDLE = 5 // 状态; IDLE = 在公园/广场里站着歇会儿
+// 没有需求模型时的小人配色（白灰为主，少量彩色）
 const PALETTE = ['#f5f5f4', '#f5f5f4', '#e7e5e4', '#d6d3d1', '#cbd5e1', '#94a3b8', '#64748b', '#475569', '#334155', '#1f2937', '#1f2937', '#9a6b4b', '#3b5b8c']
 
+/** 小人的几何体: 胶囊身体 + 球头，约 1.7m 高；下半身顶点色压暗，远看有「上衣 + 裤子」的层次 */
 export function personGeometry() {
   const body = new THREE.CapsuleGeometry(0.2, 0.95, 3, 8)
   body.scale(1.25, 1, 0.9)
@@ -31,6 +43,12 @@ export function personGeometry() {
 export const PEOPLE_PALETTE = PALETTE
 
 export class Crowd {
+  /**
+   * @param capacity    最多同时存在多少人（类型化数组的长度）
+   * @param peopleScale 小人的显示放大倍数（等轴测远景里 1:1 的人太小）
+   * @param signals     红绿灯，行人过街要看；可为 null
+   * @param demand      需求模型；可为 null
+   */
   constructor(scene, nav, rand, { capacity = 4000, peopleScale = 1.5, signals = null, demand = null } = {}) {
     this.nav = nav
     this.demand = demand // 需求模型（人群分组 + 场馆活动）。为 null 时退回「随机逛几家店」的老逻辑
@@ -52,17 +70,18 @@ export class Crowd {
     this.ready = false
     this.spawnDebt = 0
 
+    // ---- 每个人的状态，按槽位 i 索引 ----
     const n = capacity
     this.state = new Uint8Array(n)
     this.x = new Float32Array(n); this.y = new Float32Array(n)
     this.vx = new Float32Array(n); this.vy = new Float32Array(n)
-    this.speed = new Float32Array(n)
-    this.lane = new Float32Array(n)
-    this.dest = new Int16Array(n)
-    this.stops = new Uint8Array(n)
-    this.timer = new Float32Array(n)
-    this.phase = new Float32Array(n)
-    this.scale = new Float32Array(n)
+    this.speed = new Float32Array(n) // 步行速度 1.15~1.6 m/s
+    this.lane = new Float32Array(n) // 相对引导线的横向偏移，让人流铺满人行道
+    this.dest = new Int16Array(n) // 目的地 dests 下标
+    this.stops = new Uint8Array(n) // 无需求模型时: 还要逛几家店
+    this.timer = new Float32Array(n) // 停留 / 进出门的倒计时（仿真秒）
+    this.phase = new Float32Array(n) // 走路起伏的相位
+    this.scale = new Float32Array(n) // 显示缩放 0~1，进出门时渐变
     this.hx = new Float32Array(n); this.hy = new Float32Array(n) // 在店内时的热力落点
     this.door = new Uint8Array(n) // 进的是这栋楼的第几扇门
     this.group = new Uint8Array(n) // 属于哪类人群（GROUPS 的下标）
@@ -75,7 +94,7 @@ export class Crowd {
     this.#buildDestinations(scene)
     this.#buildMesh()
 
-    // 邻域查询用的哈希网格
+    // 邻域查询用的哈希网格: 1.6m 一格，每格一条链表（head/next），分离力只看 3x3 格
     this.hashCell = 1.6
     this.hashCols = Math.ceil((nav.cols * nav.cell) / this.hashCell) + 1
     this.hashRows = Math.ceil((nav.rows * nav.cell) / this.hashCell) + 1
@@ -84,6 +103,7 @@ export class Crowd {
     this._la = [0, 0, 0]
   }
 
+  /** 把楼、出入口、歇脚点整理成目的地列表，并建每栋楼的统计记录（吸引力、面积、内点、在内人数） */
   #buildDestinations(scene) {
     const nav = this.nav
     const byId = new Map(scene.buildings.map((b) => [b.id, b]))
@@ -145,6 +165,7 @@ export class Crowd {
     this.#refreshWeights()
   }
 
+  /** 楼的抽样权重 = 吸引力 × 面积（千㎡）。#pick 时还会乘距离衰减 */
   #refreshWeights() {
     for (const d of this.dests) {
       if (d.type !== 'door') continue
@@ -162,6 +183,7 @@ export class Crowd {
     this.#refreshWeights()
   }
 
+  /** 所有人一个 InstancedMesh；实例矩阵每步重写，颜色只在生成时写 */
   #buildMesh() {
     const geo = personGeometry()
     const mat = new THREE.MeshStandardMaterial({ roughness: 0.8, vertexColors: true })
@@ -175,7 +197,10 @@ export class Crowd {
     for (let i = 0; i < this.capacity; i++) this.mesh.setColorAt(i, c.set(PALETTE[(this.rand() * PALETTE.length) | 0]))
   }
 
-  /** 每帧花几毫秒算距离场，算完之前不出人，避免首帧卡死 */
+  /**
+   * 分帧预热: 每帧花 budgetMs 算几张距离场，全部算完才 ready。城区 127 张约 5 秒。
+   * 算完后立刻按目标人数把人「撒在半路上」，开场就是热闹的，不用等人从出入口慢慢走进来。
+   */
   #warmup(budgetMs = 12) {
     const t0 = performance.now()
     while (this.pendingFields.length && performance.now() - t0 < budgetMs) {
@@ -198,8 +223,11 @@ export class Crowd {
     return true
   }
 
+  /**
+   * 从 list 里按 权重 × 距离衰减（e^(-d/140m)）抽一个从 (x,y) 可达的目的地；exclude 排除刚离开的那个。
+   * 出入口不做距离衰减（离开时去哪个口是均匀的）。返回 dests 下标，没有可达的返回 -1
+   */
   #pick(list, x, y, exclude = -1) {
-    // 按 权重 × 距离衰减 抽一个当前位置可达的目的地
     let total = 0
     const w = this._w || (this._w = new Float32Array(this.dests.length))
     for (const i of list) {
@@ -316,6 +344,7 @@ export class Crowd {
     return i
   }
 
+  /** 走到目的地: 出入口 → 离场；歇脚点 → IDLE；楼 → 挑最近的一扇门进去（ENTER 动画 0.45s） */
   #arrive(i) {
     const d = this.dests[this.dest[i]]
     if (d.type === 'portal') return this.#free(i)
@@ -390,7 +419,10 @@ export class Crowd {
     this.#writeInstances()
   }
 
-  /** dt = 仿真秒。write=false 时只推进状态不写实例矩阵（一帧里有多个子步时，只有最后一步需要写） */
+  /**
+   * 推进 dt 仿真秒。write=false 时只推进状态不写实例矩阵（一帧里有多个子步时，只有最后一步需要写）。
+   * 顺序: 预热 → 刷新应有人数 → 住户出门 / 回家 → 从出入口补人到目标数 → 重建哈希网格 → 逐人更新 → 写实例
+   */
   update(dt, write = true) {
     if (!this.ready && !this.#warmup()) return
     const { nav, state, x, y, vx, vy } = this
@@ -419,7 +451,7 @@ export class Crowd {
       }
     }
 
-    // 维持目标人数
+    // 维持目标人数: 缺多少就按比例补（每秒最多 40 人），用「欠账」累计小数部分
     const want = Math.min(this.population, this.capacity)
     if (this.active < want && this.portals.length) {
       this.spawnDebt += Math.min(40, (want - this.active) * 0.5 + 2) * dt
@@ -439,7 +471,7 @@ export class Crowd {
       this.hashHead[h] = i
     }
 
-    const steer = 1 - Math.exp(-dt * 5)
+    const steer = 1 - Math.exp(-dt * 5) // 速度向目标速度靠拢的一阶低通系数（时间常数 0.2s）
     this.heatCount = 0
     for (let i = 0; i < this.high; i++) {
       const s = state[i]
@@ -472,7 +504,7 @@ export class Crowd {
         continue
       }
 
-      // WALK
+      // WALK: 引导点 = 沿距离场往前 5 格；到目标 1.4m 内算到达
       this.scale[i] = Math.min(1, this.scale[i] + dt * 3)
       const look = nav.lookAhead(d.field, x[i], y[i], 5, la)
       if (!look) { this.#free(i); continue }
@@ -486,7 +518,7 @@ export class Crowd {
       }
       let ax = (gx / gl) * this.speed[i], ay = (gy / gl) * this.speed[i]
 
-      // 分离
+      // 分离力: 0.9m 内的邻居互相推开，力随距离线性增大
       const hc = Math.floor((x[i] - nav.minX) / this.hashCell), hr = Math.floor((y[i] - nav.minY) / this.hashCell)
       for (let dj = -1; dj <= 1; dj++) {
         for (let di = -1; di <= 1; di++) {
@@ -514,6 +546,7 @@ export class Crowd {
           continue
         }
       }
+      // 撞墙: 能走就走；不能就试着只走 x 或只走 y（沿墙滑）；都不行就减速
       if (nav.isWalkable(nx, ny)) { x[i] = nx; y[i] = ny }
       else if (nav.isWalkable(nx, y[i])) { x[i] = nx; vy[i] *= 0.3 }
       else if (nav.isWalkable(x[i], ny)) { y[i] = ny; vx[i] *= 0.3 }
@@ -523,6 +556,7 @@ export class Crowd {
     if (write) this.#writeInstances()
   }
 
+  /** 真正进楼: 记账（visitors / insideCount）、定停留时长（店 / 办公 / 场馆各不同）、选热力落点 */
   #goInside(i, d) {
     if (d.cat === 'home' && this.demand) return this.#free(i, this.home[i] === this.dest[i]) // 回到住处 = 离开仿真（住户记为在家）
     this.state[i] = INSIDE
@@ -555,6 +589,7 @@ export class Crowd {
     for (const i of ps) this.dests[i].queue += n / ps.length
   }
 
+  /** 补人时从哪个出入口进来: 先消耗车站的到站队列（列车刚到），否则按出入口权重抽 */
   #pickPortal() {
     let qTotal = 0
     for (const i of this.portals) qTotal += Math.max(0, this.dests[i].queue)
@@ -572,12 +607,17 @@ export class Crowd {
     return this.portals[0]
   }
 
+  /** 哈希网格的格号 */
   #hash(px, py) {
     const c = Math.max(0, Math.min(this.hashCols - 1, Math.floor((px - this.nav.minX) / this.hashCell)))
     const r = Math.max(0, Math.min(this.hashRows - 1, Math.floor((py - this.nav.minY) / this.hashCell)))
     return r * this.hashCols + c
   }
 
+  /**
+   * 写实例矩阵。看不见的人（FREE / INSIDE / 缩放为 0）写零矩阵；其余按速度方向转身，走路时上下起伏一点。
+   * 直接写 Float32Array 而不是 setMatrixAt，省掉几千次对象操作
+   */
   #writeInstances() {
     const arr = this.mesh.instanceMatrix.array
     const S = this.peopleScale
