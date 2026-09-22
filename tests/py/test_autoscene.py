@@ -196,8 +196,8 @@ def test_build_labels_uses_image_roads_only_without_osm():
     roads[95:105, :] = True
     crop = sg.crop(_rect(120, 80, 150, 125))
     lab, _ = autoscene.build_labels(img, 0.5, [crop], None, roads)
-    assert lab[100, 10] == CID["road"] and lab[100, 130] == CID["road"]  # 路面盖掉楼的像素
-    assert lab[90, 130] == CID["residential"]
+    assert lab[100, 10] == CID["road"]  # 楼外面是路
+    assert lab[100, 130] == CID["residential"] and lab[90, 130] == CID["residential"]  # 网络的路不切楼: 楼优先
     feats = {k: [] for k in ("roads", "water", "green", "park", "parking", "plaza", "buildings", "waterways")}
     feats["roads"] = [dict(pts=np.array([[0.0, 30.0 + 40 * i], [200.0, 30.0 + 40 * i]]), cls="residential", width_m=4, oneway=False, elevated=False) for i in range(3)]
     lab2, _ = autoscene.build_labels(img, 0.5, [], feats, roads)
@@ -233,3 +233,23 @@ def test_three_channel_training_inherits_two_channel_weights(tmp_path, monkeypat
     probs = roofnet.predict(np.zeros((70, 90, 3), np.uint8), 0.3, path=w3)
     assert len(probs) == 3 and probs[2].shape == (70, 90)
     roofnet._model_cache.clear()
+
+
+def test_merge_sam_prefers_whole_towers():
+    shape = (100, 100)
+    tower = sg.crop(_rect(10, 10, 50, 40, shape))  # SAM: 整栋塔楼
+    frag = sg.crop(_rect(15, 15, 30, 25, shape))  # 网络: 塔楼上的一块碎屋顶
+    house = sg.crop(_rect(70, 70, 90, 90, shape))  # 网络: SAM 没找到的一栋小楼
+    dup = sg.crop(_rect(70, 70, 80, 90, shape))  # SAM: 只盖住小楼的一半（小楼保留，这块算重复不加）
+    got = autoscene.merge_sam([frag, house], [tower, dup], shape)
+    assert sorted((c[0], c[1]) for c in got) == [(10, 10), (70, 70)]
+
+
+def test_tall_scene_detection():
+    rng = np.random.default_rng(0)
+    img = rng.integers(120, 200, (400, 400, 3)).astype(np.uint8)  # 亮地面，没有暗峰
+    assert not autoscene.tall_scene(img, 0.5)
+    for k in range(12):  # 12 块又大又黑的楼影
+        y, x = 20 + (k // 4) * 120, 20 + (k % 4) * 95
+        img[y:y + 60, x:x + 40] = 20
+    assert autoscene.tall_scene(img, 0.5)

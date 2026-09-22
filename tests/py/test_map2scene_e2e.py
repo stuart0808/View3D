@@ -88,3 +88,22 @@ def test_slender_building_is_capped(tmp_path):
     b = json.loads((tmp_path / "s.json").read_text("utf-8"))["buildings"][0]
     assert b["floors"] <= 8 * 5.5 / 3  # 最窄边约 5m（抗锯齿 / 圆角有点误差）
     assert "细长比上限" in pr.stderr.decode("utf-8", "replace")
+
+
+def test_sidecar_footprints_keep_touching_houses_apart(tmp_path):
+    img = np.full((200, 300, 3), 235, np.uint8)
+    img[90:110, :] = (255, 0, 0)  # 一条路（标记图里只有路，楼全在 sidecar 里）
+    cv2.imencode(".png", img)[1].tofile(str(tmp_path / "m.png"))
+    side = {"footprints": [
+        {"poly": [[40, 30], [70, 30], [70, 60], [40, 60]], "kind": "residential", "floors": 3},
+        {"poly": [[70, 30], [100, 30], [100, 60], [70, 60]], "kind": "residential", "floors": 4},  # 紧挨着
+        {"poly": [[150, 130], [230, 130], [230, 180], [150, 180]], "kind": "shop", "floors": 2},
+    ]}
+    (tmp_path / "side.json").write_text(json.dumps(side), "utf-8")
+    pr = subprocess.run([sys.executable, str(TOOLS / "map2scene.py"), str(tmp_path / "m.png"), "-o", str(tmp_path / "s.json"), "--mpp", "0.5",
+                         "--sidecar", str(tmp_path / "side.json")], capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    assert pr.returncode == 0, pr.stderr.decode("utf-8", "replace")
+    s = json.loads((tmp_path / "s.json").read_text("utf-8"))
+    assert len(s["buildings"]) == 3  # 两栋挨着的没被并成一栋
+    assert sorted(b["floors"] for b in s["buildings"]) == [2, 3, 4]  # 层数原样保留
+    assert "sidecar 单栋轮廓: 3 栋" in pr.stderr.decode("utf-8", "replace")

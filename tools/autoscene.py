@@ -123,6 +123,51 @@ def square_pixels(img, geo):
     return img, dict(geo, dlon=geo["dlon"] / sx)
 
 
+def tall_scene(img, mpp):
+    """
+    这张图是不是高层小区（楼很高、影子又长又黑）。判据: 亮度直方图里有一群明显的「楼影」暗峰
+    （shadow_mask 的谷底阈值 < 60，没被夹到上限 65），阴影占 5%~40%，并且有 10 块以上 300㎡ 的大片阴影。
+    村镇、别墅区、欧洲老城的图都找不到这样的暗峰（阈值被夹到 65），不会误判。
+    为什么要判断: 屋顶分割网络的训练数据（SpaceNet）里几乎没有高层，塔楼常只认出零碎的屋顶；这种图要叠加 SAM。
+    """
+    sh, thr = sg.shadow_mask(img)
+    if thr >= 60 or not 0.05 <= sh.mean() <= 0.40:
+        return False
+    n, _, st, _ = cv2.connectedComponentsWithStats(sh.astype(np.uint8), connectivity=8)
+    big = int((st[1:, cv2.CC_STAT_AREA] * mpp * mpp > 300).sum())  # 300㎡ 以上的大片阴影块数
+    return big >= 10
+
+
+def merge_sam(net, sam, shape):
+    """
+    合并屋顶网络和 SAM 的结果（高层场景）: SAM 给的是整栋塔楼（屋顶 + 立面），网络常只给碎屋顶 ——
+    网络的块有 60% 以上落在某个 SAM 块里就丢掉（让位给完整的那栋）；SAM 的块和剩下的网络块重叠超过 30% 的不加（重复）。
+    """
+    sam_mask = np.zeros(shape, bool)
+    for x0, y0, sub in sam:
+        sam_mask[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] |= sub
+    keep = [c for c in net if (c[2] & sam_mask[c[1]:c[1] + c[2].shape[0], c[0]:c[0] + c[2].shape[1]]).sum() <= 0.6 * c[2].sum()]
+    net_mask = np.zeros(shape, bool)
+    for x0, y0, sub in keep:
+        net_mask[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] |= sub
+    add = [c for c in sam if (c[2] & net_mask[c[1]:c[1] + c[2].shape[0], c[0]:c[0] + c[2].shape[1]]).sum() <= 0.3 * c[2].sum()]
+    return keep + add
+
+
+def make_sam_segmenter():
+    """SAM 的「全图分割」函数；没装 SAM / 权重下载失败返回 None"""
+    try:
+        import sat2marks
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        # 本地有 mobile_sam.pt 就用本地的，否则按设备选: 有 GPU 用大模型 sam2.1_l（准），CPU 用 MobileSAM（快）
+        model = str(HERE / "mobile_sam.pt") if (HERE / "mobile_sam.pt").exists() else ("sam2.1_l.pt" if dev == "cuda" else "mobile_sam.pt")
+        # SamBackend 构造时要一张图，这里给个 8×8 占位，真正的图由 segment_all 在 find_buildings 里传入
+        return sat2marks.SamBackend(np.zeros((8, 8, 3), np.uint8), model, dev).make_segment_all()
+    except Exception:
+        return None
+
+
 def detect_buildings(img, mpp, method="auto", progress=None):
     """建筑检测，按 method 或可用性选: roofnet / sam / color。返回 (裁剪块列表, 实际用的方法)
 
@@ -140,20 +185,16 @@ def detect_buildings(img, mpp, method="auto", progress=None):
     # 首选 roofnet: 专门训练的屋顶分割 + 分水岭拆楼，村镇密集民房上比 SAM 好得多
     if method in ("auto", "roofnet") and roofnet.available():
         probs = roofnet.predict(img, mpp, progress=progress)  # [建筑, 边界] 或 [建筑, 边界, 道路]
-        return roofnet.instances(probs[0], probs[1], mpp), "roofnet", (probs[2] if len(probs) > 2 else None)
+        crops = roofnet.instances(probs[0], probs[1], mpp)
+        road = probs[2] if len(probs) > 2 else None
+        if method == "auto" and tall_scene(img, mpp):  # 高层小区: 叠加 SAM 补整栋塔楼
+            seg = make_sam_segmenter()
+            if seg:
+                sam = [c["crop"] for c in sg.find_buildings(img, mpp, seg)]
+                return merge_sam(crops, sam, img.shape[:2]), "roofnet+sam", road
+        return crops, "roofnet", road
     # 其次 SAM: 作为 find_buildings 的「分割一切」后端；seg 留 None 时 find_buildings 只用颜色连通块
-    seg = None
-    if method in ("auto", "sam"):
-        try:
-            import sat2marks
-            # 本地有 mobile_sam.pt 就用本地的，否则按设备选: 有 GPU 用大模型 sam2.1_l（准），CPU 用 MobileSAM（快）
-            model = str(HERE / "mobile_sam.pt") if (HERE / "mobile_sam.pt").exists() else None
-            import torch
-            dev = "cuda" if torch.cuda.is_available() else "cpu"
-            # SamBackend 构造时要一张图，这里给个 8×8 占位，真正的图由 segment_all 在 find_buildings 里传入
-            seg = sat2marks.SamBackend(np.zeros((8, 8, 3), np.uint8), model or ("sam2.1_l.pt" if dev == "cuda" else "mobile_sam.pt"), dev).make_segment_all()
-        except Exception:
-            seg = None  # 没装 SAM: 颜色连通块兜底
+    seg = make_sam_segmenter() if method in ("auto", "sam") else None  # 没装 SAM: 颜色连通块兜底
     # find_buildings 返回候选 dict（含评分等），这里只要裁剪块
     found = sg.find_buildings(img, mpp, seg, progress=progress)
     return [c["crop"] for c in found], "sam" if seg else "color", None
@@ -252,9 +293,10 @@ def build_labels(img, mpp, bld_crops, feats=None, img_roads=None, bld_floors=Non
     # 图像识别的路（第二版屋顶网络才有）: OSM 没给出像样的路网（没坐标 / 那片 OSM 没画）时才用，
     # 画在植被之上、建筑之下；也记进 road，后面图像识别的楼压在上面的部分会被抠掉
     osm_has_roads = bool(feats and len(feats["roads"]) >= 3)
+    img_road_px = None
     if img_roads is not None and not osm_has_roads:
-        lab[img_roads] = CID["road"]
-        road |= img_roads.astype(np.uint8)
+        # 网络的路不如 OSM 可靠（高层的白色立面偶尔被认成路），所以反过来: 楼优先，路只画在没有楼的地方（楼画完之后再补）
+        img_road_px = img_roads
     # 图像识别的楼: 去重 → 抠路 → 去碎块，剩下的补进标签图
     for k, c in enumerate(bld_crops):
         x0, y0, sub = c
@@ -272,6 +314,9 @@ def build_labels(img, mpp, bld_crops, feats=None, img_roads=None, bld_floors=Non
         lab[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]][sub] = cls
         est = bld_floors[k] if bld_floors else None  # 影子估的层数（大厂房 / 商场不信它: 影子多半被遮挡或连成一片）
         blds.append({"crop": (x0, y0, sub), "cls": cls, "floors": est if (est and kind != "shop") else default_floors(area, kind)})
+    if img_road_px is not None:  # 图像识别的路: 只填没有楼的像素
+        free = ~np.isin(lab, list(BUILDING_IDS))
+        lab[img_road_px & free] = CID["road"]
     return lab, blds
 
 
@@ -346,17 +391,23 @@ def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progre
         lut[c["id"]] = (*hex_bgr(c["color"]), 255)
     stem = out_json.stem
     marks = work / f"{stem}_marks.png"
-    imwrite_unicode(marks, lut[lab])  # lut[lab]: (H,W) → (H,W,4)，PNG 无损保证颜色不变
+    # 建筑不涂进标记图，改由 sidecar 的 footprints 一栋一栋直接给 map2scene: 挨着的房子涂成同一种颜色会连成一块，
+    # map2scene 按色块认楼就把它们当成一栋了（实测老城区样例 263 栋变 168 栋）
+    kind_of = {CID["shop2"]: "shop", CID["block"]: "block", CID["residential"]: "residential"}
+    marks_lab = lab.copy()
+    marks_lab[np.isin(marks_lab, list(BUILDING_IDS))] = 0  # 楼的位置留空（map2scene 会按 footprints 扣掉）
+    imwrite_unicode(marks, lut[marks_lab])  # lut[lab]: (H,W) → (H,W,4)，PNG 无损保证颜色不变
     side = work / f"{stem}_sidecar.json"
-    at = []
-    for b in blds:  # sidecar: 每栋楼一个落在楼里的点 + 层数
+    fps = []
+    for b in blds:  # sidecar: 每栋楼的像素轮廓（1 像素容差简化）+ 类型 + 层数
         x0, y0, sub = b["crop"]
-        # 取离边最远的像素（距离变换最大值）当代表点: 凹形 / L 形楼的外接框中心可能落在楼外；
-        # 四周补一圈 0，让贴着裁剪框边的像素也算到「边」的距离
-        d = cv2.distanceTransform(np.pad(sub, 1).astype(np.uint8), cv2.DIST_L2, 3)[1:-1, 1:-1]
-        j = int(d.argmax())  # 展平后的下标，下面换回 (列, 行) 再加上裁剪框偏移
-        at.append({"at": [x0 + j % sub.shape[1], y0 + j // sub.shape[1]], "floors": b["floors"]})
-    side.write_text(json.dumps({"buildings": at}), "utf-8")
+        cnts, _ = cv2.findContours(sub.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        c = cv2.approxPolyDP(max(cnts, key=cv2.contourArea), 1.0, True).reshape(-1, 2) + [x0, y0]  # 最大的一块，回到全图坐标
+        if len(c) >= 3:
+            fps.append({"poly": c.tolist(), "kind": kind_of.get(b["cls"], "residential"), "floors": b["floors"]})
+    side.write_text(json.dumps({"footprints": fps}), "utf-8")
 
     # ---- 5. map2scene: 标记图 → scene.json ----
     # 用子进程而不是 import: map2scene 是独立的命令行工具，出错 / 内存峰值不影响常驻的 sat_server；

@@ -76,6 +76,18 @@ DEFAULT_MARKERS = [
 # ----------------------------------------------------------------------------
 # 基础工具
 # ----------------------------------------------------------------------------
+def remove_by_id(lst, item):
+    """
+    按对象身份从列表里删掉 item。不能用 list.remove: 它拿 == 挨个比，元素里有 numpy 数组时（边的端点、折线），
+    只要排在前面的某个元素其他字段恰好相等，比到数组就会抛「truth value of an array is ambiguous」
+    """
+    for i, x in enumerate(lst):
+        if x is item:
+            del lst[i]
+            return
+    raise ValueError("不在列表里")
+
+
 def log(*a):
     """进度信息走 stderr，stdout 留给可能的管道输出；每行带 [map2scene] 前缀便于在 npm 脚本输出里辨认"""
     print("[map2scene]", *a, file=sys.stderr)
@@ -295,7 +307,7 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
                         continue
                     if all(e["L"] < jog_tol * 1.5 for e in mids) and sum(e["L"] for e in mids) < jog_tol * 3:  # 每条都短、总长也短
                         for e in mids:
-                            es.remove(e)
+                            remove_by_id(es, e)
                         changed = True
                         break
                 if changed:
@@ -315,7 +327,7 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
                     e["c"] = (e["c"] * e["L"] + q["c"] * q["L"]) / tot  # 位置按长度加权，长边说了算
                     e["L"] = tot
                     e["b"] = q["b"]
-                    es.remove(q)
+                    remove_by_id(es, q)
                 else:
                     j = e["b"]  # 连接边放在 e 的末端处，长度 = 两条边的错位量
                     t = "V" if e["t"] == "H" else "H"
@@ -575,7 +587,7 @@ def prune_and_merge(nodes, edges, dt):
                  and poly_len(e[2]) < 1.2 * max_width_of(e[2])]
         if spurs:
             for e in spurs:
-                edges.remove(e)
+                remove_by_id(edges, e)
             continue
         # 拼接度为 2 的节点
         # 剪掉毛刺后留下的「假路口」只连两条边，把两条折线首尾接起来成一条；每次只拼一个然后重算度数
@@ -594,8 +606,8 @@ def prune_and_merge(nodes, edges, dt):
             a = e1[0] if e1[1] == n else e1[1]
             p2 = e2[2] if e2[0] == n else e2[2][::-1]
             b = e2[1] if e2[0] == n else e2[0]
-            edges.remove(e1)
-            edges.remove(e2)
+            remove_by_id(edges, e1)
+            remove_by_id(edges, e2)
             edges.append([a, b, np.vstack([p1, p2[1:]])])  # p2[0] 就是 n，和 p1[-1] 重复，去掉
             merged = True
             break
@@ -612,7 +624,7 @@ def prune_and_merge(nodes, edges, dt):
         if short is None:
             break  # 三种整理都无事可做，收工
         a, b, _ = short
-        edges.remove(short)
+        remove_by_id(edges, short)
         # 合并后的位置取两者里「更靠路中心」的那个（距离变换值大的）。取中点会让节点偏离宽路的中心线，
         # 而车道是按「到节点的距离」截短的，一偏支路车道就伸进主干路里去了
         def dt_at(n_):
@@ -809,6 +821,18 @@ def main():
                 continue
             hs = [h for h in (simplify_ring(h, max(1.0, args.simplify_m / mpp)) for h in holes) if h is not None]
             raw.append((markers[i], to_m(s), [to_m(h) for h in hs]))
+    # sidecar 里直接给出的单栋轮廓（autoscene 用）: 挨在一起的房子在按类别涂色的标记图上会连成一块，
+    # 被当成一栋；直接给轮廓就能保住「一栋一栋」。轮廓是像素坐标，kind / floors 跟着走
+    side_early = json.loads(Path(args.sidecar).read_text("utf-8")) if args.sidecar else {}
+    for fp in side_early.get("footprints", []):
+        ring = np.asarray(fp["poly"], np.float64)
+        if len(ring) < 3:
+            continue
+        cv2.fillPoly(bmask_all, [np.round(ring).astype(np.int32).reshape(-1, 1, 2)], 255)  # 也要从道路 / 铺装里扣掉
+        mk = {"kind": fp.get("kind", "residential"), "floors": fp.get("floors") or 2, "fixed_floors": bool(fp.get("floors"))}
+        raw.append((mk, to_m(ring), []))
+    if side_early.get("footprints"):
+        log(f"sidecar 单栋轮廓: {len(side_early['footprints'])} 栋")
     if not raw:
         log("警告: 没有识别到任何建筑色块（检查标记颜色，或调大 --tol）")
 
@@ -825,7 +849,9 @@ def main():
         kind = mk.get("kind", "shop")
         poly = ortho_building(shell, holes, ang, not args.no_ortho and kind != "venue")  # 场馆多是椭圆、异形，保持原样
         floors = mk.get("floors", 2)
-        if kind == "block":
+        if mk.get("fixed_floors"):
+            pass  # sidecar 轮廓自带层数（OSM / 影子估的 / 按面积给的），不再按类型随机
+        elif kind == "block":
             floors = int(min(28, 6 + poly.area // 260 + (k * 7) % 5))  # 每 260㎡ 占地加 1 层，再加按序号的伪随机抖动，封顶 28
         elif kind == "residential":
             floors = 9 + (k * 5) % 10  # 9~18 层，按序号错开，避免一排楼一样高
