@@ -1,4 +1,8 @@
 <script setup>
+// 演示壳。真正的产品只需要 <CityScene>；这个文件里其余都是调试条:
+//   左下: 场景切换、仿真时钟 + 倍速、跳时间按钮、热力开关、高峰人数、实时计数
+//   左上: 各人群在场人数、住户去向、场馆活动状态
+//   右下: 视角按钮；底部中央: 室内视图切换（点到楼之后出现）
 import { computed, ref } from 'vue'
 import CityScene from './components/CityScene.vue'
 
@@ -8,11 +12,12 @@ import CityScene from './components/CityScene.vue'
 const sceneName = new URLSearchParams(location.search).get('scene') || 'district'
 const SCENES = [{ id: 'district', t: '城区' }, { id: 'demo', t: '街区' }]
 const gotoScene = (id) => (location.search = '?scene=' + id)
-const heat = ref(true)
-const base = ref(600)
+const heat = ref(true) // 热力图开关
+const base = ref(600) // 高峰人数（传给 population）
 // 人数、车流、昼夜都由仿真时钟驱动（src/city/clock.js）。这里只是把时钟显示出来，给几个「跳到某个时刻」的演示按钮
-const rate = ref(10)
+const rate = ref(10) // 仿真倍速，0 = 暂停
 const RATES = [{ v: 0, t: '暂停' }, { v: 1, t: '1×' }, { v: 10, t: '10×' }, { v: 30, t: '30×' }, { v: 60, t: '60×' }, { v: 120, t: '120×' }]
+// 跳时间按钮: 拿到 CityScene 暴露的时钟直接操作；「下一场活动」走引擎（要查需求模型的排期）
 const JUMPS = [
   { t: '早高峰', f: (c) => c.jumpToHour(8) },
   { t: '午间', f: (c) => c.jumpToHour(12.5) },
@@ -23,21 +28,24 @@ const JUMPS = [
   { t: '下一场活动', f: () => window.__city.jumpToNextEvent() },
 ]
 const setRate = (v) => (rate.value = v)
-const stats = ref(null)
-const city = ref(null)
+const stats = ref(null) // 引擎每秒 emit 的统计
+const city = ref(null) // CityScene 组件引用
 // 点到一栋楼 → 进室内视图；有多种视图（商场 / 地下车库）时用底部的小条切换
 const picked = ref(null)
 const view = ref('')
 const VIEW_LABEL = { mall: '商场', garage: '地下车库' }
+/** 引擎点选回调: 这栋楼有可看的室内视图就进第一个 */
 function onSelect(info) {
   if (!info.views.length) return
   picked.value = info
   enter(info.views[0])
 }
+/** 切换到某种室内视图 */
 function enter(kind) {
   view.value = kind
   city.value.showInterior(picked.value.id, kind)
 }
+/** 退出室内视图 */
 function leave() {
   picked.value = null
   city.value.hideInterior()

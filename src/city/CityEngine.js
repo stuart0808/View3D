@@ -28,22 +28,22 @@ import { makeRandom } from './geometry.js'
 
 /** 配色。可通过 options.style 局部覆盖 */
 export const DEFAULT_STYLE = {
-  background: '#b9c2ce',
-  backdrop: '#9aa6b6',
-  slab: '#eef0f2',
-  road: '#5f636b',
-  marking: '#f2f3f5',
-  centerLine: '#f0c24b',
-  pavement: '#e3e4e5',
-  wall: '#cfd3d8',
-  trim: '#eceef1',
-  roof: '#d9dce1',
-  grass: '#b1c9a8',
-  underDeck: '#c3c8c4',
-  park: '#bcd0b1',
-  plaza: '#ddd6cb',
-  water: '#8fbcdc',
-  parking: '#6d727a',
+  background: '#b9c2ce', // 画布清屏色，也是背景楼块「雾」的目标色
+  backdrop: '#9aa6b6', // 背景楼块本色
+  slab: '#eef0f2', // 地块底座、高架护栏
+  road: '#5f636b', // 路面、高架桥面
+  marking: '#f2f3f5', // 白色标线（车道线、斑马线、车位线）
+  centerLine: '#f0c24b', // 黄色中心线
+  pavement: '#e3e4e5', // 人行铺装
+  wall: '#cfd3d8', // （保留）早期建筑墙色
+  trim: '#eceef1', // （保留）早期女儿墙色
+  roof: '#d9dce1', // 屋面底色
+  grass: '#b1c9a8', // 绿化带、中央隔离带
+  underDeck: '#c3c8c4', // 桥下隔离带、匝道岛
+  park: '#bcd0b1', // 公园
+  plaza: '#ddd6cb', // 广场
+  water: '#8fbcdc', // 水面
+  parking: '#6d727a', // 停车场地面
 }
 
 export class CityEngine {
@@ -58,6 +58,7 @@ export class CityEngine {
     this.style = { ...DEFAULT_STYLE, ...(options.style || {}) }
     this.heatVisible = true
 
+    // 渲染器: 抗锯齿 + 软阴影；像素比封顶 2，4K 屏也不至于爆显存
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.shadowMap.enabled = true
@@ -81,6 +82,7 @@ export class CityEngine {
     this.keys = new Set()
     this.#bindKeys()
 
+    // 天光: 半球光（天空白、地面偏蓝灰）；强度和颜色夜里由 #applyEnvironment 调
     this.hemi = new THREE.HemisphereLight(0xffffff, 0xaab4c2, 1.15)
     this.scene.add(this.hemi)
     // 太阳: 平行光 + 4096 的软阴影贴图；阴影相机的范围在 #updateShadow 里跟着视野走
@@ -93,20 +95,22 @@ export class CityEngine {
     this.sun.shadow.normalBias = 0.35
     this.scene.add(this.sun, this.sun.target)
 
+    // 仿真时钟: 所有模块的时间都来自它（见 clock.js）
     this.clock = new SimClock(options.clock)
     this.clock.on((ev) => {
       if (ev !== 'minute') this._envTimer = 0 // 整点 / 跳时间: 立刻刷新一次环境
       if (ev === 'jump' && this.crowd) { this.#applyEnvironment(1); this.crowd.reseed() } // 跳时间后世界不连续，按新时刻重新布置人群
     })
-    this._envTimer = 0
-    this.world = null
-    this.interior = null
+    this._envTimer = 0 // 距下次刷新环境的现实秒数
+    this.world = null // 当前场景的根 Group（load 建、unload 拆）
+    this.interior = null // 打开中的室内视图
     this.onSelect = options.onSelect || null
     this.#bindPicking()
     this.timer = new THREE.Clock()
     this.frame = 0
     this._tick = this._tick.bind(this)
     this._resize = this._resize.bind(this)
+    // 容器尺寸变化自动适配；然后开始逐帧循环
     this.resizeObserver = new ResizeObserver(this._resize)
     this.resizeObserver.observe(container)
     this._resize()
@@ -449,6 +453,10 @@ export class CityEngine {
     this.camera.updateProjectionMatrix()
   }
 
+  /**
+   * 每帧: 现实 dt（封顶 50ms，切标签页回来不会一下推进很多）→ 时钟换算成仿真秒 → 环境刷新 →
+   * 子步推进红绿灯 / 人群 / 车流 / 轨道 → 热力 → 室内视图 → 键盘视角 → 镜头缓动 → 阴影范围 → 渲染
+   */
   _tick() {
     this.raf = requestAnimationFrame(this._tick)
     const dt = Math.min(this.timer.getDelta(), 0.05)
@@ -470,11 +478,13 @@ export class CityEngine {
       }
       if (this.heat && this.heatVisible) this.heat.update(dt, this.crowd.heatSamples, this.crowd.heatCount) // 热力的时间平滑按现实时间，倍速再高也不闪
     }
+    // 室内视图拿实时数据: 车库要占用数，商场要楼内人数
     if (this.interior) {
       const id = this.interior.buildingId
       this.interior.update(simDt, this.interior.kind === 'garage' ? this.traffic?.garageInfo(id) : this.crowd?.buildings.get(id)?.visitors)
     }
     this.#applyKeys(dt)
+    // 镜头缓动（#flyTo 发起）: smoothstep 插值目标点和缩放，视角方向不变
     if (this.fly) {
       const f = this.fly
       f.t = Math.min(1, f.t + dt / 0.6)
@@ -491,6 +501,7 @@ export class CityEngine {
     this.frame++
   }
 
+  /** 彻底销毁: 停帧循环、拆世界、释放渲染器并把 canvas 从 DOM 摘掉 */
   dispose() {
     cancelAnimationFrame(this.raf)
     this.resizeObserver.disconnect()
