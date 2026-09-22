@@ -1208,6 +1208,22 @@ def main():
             pt = Point(*to_m(v["at"]))
             best_b = min(cands, key=lambda b: b["geom"].distance(pt))
             best_b["venue"] = {k_: v[k_] for k_ in ("name", "type", "capacity") if k_ in v}
+    # 逐栋楼的层数（sat2marks 用影子估出来的，或者用户手填的）: at 点落在哪栋楼里（容差 3m）就改那栋。
+    # 几个点落进同一栋（挨着的楼在标记图上连成了一块）时取最高的，免得一栋高楼被旁边的矮楼拉低
+    got_floors = {}
+    for a in side.get("buildings", []):
+        if not a.get("floors"):
+            continue
+        pt = Point(*to_m(a["at"]))
+        hit = [b for b in buildings if b["geom"].distance(pt) <= 3.0]
+        if hit:
+            b = min(hit, key=lambda b_: b_["geom"].distance(pt))  # 离得最近的那栋（在楼里时距离为 0）
+            got_floors[b["id"]] = max(got_floors.get(b["id"], 0), int(max(1, round(a["floors"]))))
+    for b in buildings:
+        if b["id"] in got_floors:
+            b["floors"] = got_floors[b["id"]]
+    if side.get("buildings"):
+        log(f"sidecar 层数: {len(got_floors)} 栋楼（共 {len(side['buildings'])} 条记录）")
     # 轨道交通: 线路折线 + 车站，原样透传（只换坐标单位），前端自己画轨道 / 跑车
     transit = None
     if side.get("transit"):
