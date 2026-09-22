@@ -155,7 +155,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
   }
   for (const lane of scene.lanes || []) { // 每条路（一条 lane 记录 = 一条路的中心线 + 路宽）
     const y = 0.025 + (lane.level ? ELEVATED_H : 0) // 标线浮在路面上方 2.5cm，高架的抬到桥面
-    const { n, laneW, offsets } = laneLayout(lane.width, !!lane.oneway, lane.median || 0) // 单向车道数、车道宽、各车道中心偏移
+    const { n, laneW, offsets } = laneLayout(lane.width, !!lane.oneway, lane.median || 0, lane.laneCount || 0) // 单向车道数、车道宽、各车道中心偏移
     if (lane.median) {
       // 桥下的路: 中间是一整条桥下隔离带（另建），两侧车道之间白虚线，最内侧画一条白实线当边线
       underDeck.push(lane)
@@ -169,7 +169,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
       for (let k = 1; k < n; k++) stroke(lane.points, offsets[k] - laneW / 2, 0.18, style.marking, true, y)
       continue
     }
-    if (hasMedian(lane.width)) medians.push(lane) // 单向 ≥3 车道: 实体中央隔离带，下面另建
+    if (hasMedian(lane.width, !!lane.oneway, lane.laneCount || 0)) medians.push(lane) // 单向 ≥3 车道: 实体中央隔离带，下面另建
     else if (n >= 2) { stroke(lane.points, 0.2, 0.16, style.centerLine, false, y); stroke(lane.points, -0.2, 0.16, style.centerLine, false, y) } // 双黄实线，间距 40cm
     else stroke(lane.points, 0, 0.2, style.centerLine, true, y) // 单车道: 黄虚线（可借道超车）
     for (let k = 1; k < n; k++) for (const sgn of [1, -1]) stroke(lane.points, sgn * k * laneW, 0.18, style.marking, true, y) // 同向车道之间的白虚线，两侧对称

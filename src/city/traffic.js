@@ -92,7 +92,7 @@ export class Traffic {
     g.edges.forEach((e, edgeIndex) => {
       if (e.width < MIN_ROAD_WIDTH || e.points.length < 2) return // 太窄的路、退化的边不建车道
       // 车道数 / 单车道宽 / 各车道相对中心线的偏移都由 roads.js 统一算，保证和画出来的标线一致
-      const { n, laneW, offsets } = laneLayout(e.width, !!e.oneway, e.median || 0)
+      const { n, laneW, offsets } = laneLayout(e.width, !!e.oneway, e.median || 0, e.laneCount || 0)
       const pair = []
       // 单行路只建 oneway 指定的那个方向（1 = a→b，-1 = b→a）；双向路两个方向各建一个 way
       for (const dir of e.oneway ? [e.oneway] : [1, -1]) {
