@@ -74,3 +74,17 @@ def test_sidecar_floors(scene):
     assert by["block"]["floors"] == 12
     assert by["shop"]["floors"] == 2  # 没给的保持默认（红色 = 2 层商铺）
     assert "sidecar 层数: 2 栋楼（共 3 条记录）" in log
+
+
+def test_slender_building_is_capped(tmp_path):
+    img = np.full((200, 300, 3), 235, np.uint8)
+    img[90:110, :] = (255, 0, 0)  # 一条路
+    img[40:50, 40:200] = (128, 255, 0)  # 5m 宽、80m 长的窄条住宅
+    cv2.imencode(".png", img)[1].tofile(str(tmp_path / "m.png"))
+    (tmp_path / "side.json").write_text(json.dumps({"buildings": [{"at": [120, 45], "floors": 40}]}), "utf-8")
+    pr = subprocess.run([sys.executable, str(TOOLS / "map2scene.py"), str(tmp_path / "m.png"), "-o", str(tmp_path / "s.json"), "--mpp", "0.5",
+                         "--sidecar", str(tmp_path / "side.json")], capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    assert pr.returncode == 0, pr.stderr.decode("utf-8", "replace")
+    b = json.loads((tmp_path / "s.json").read_text("utf-8"))["buildings"][0]
+    assert b["floors"] <= 8 * 5.5 / 3  # 最窄边约 5m（抗锯齿 / 圆角有点误差）
+    assert "细长比上限" in pr.stderr.decode("utf-8", "replace")

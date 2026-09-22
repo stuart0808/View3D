@@ -420,7 +420,7 @@ class Session:
         """
         if self.job["running"]:
             return {"error": f"「{self.job['name']}」还在跑，等它结束"}
-        self.job = {"name": name, "running": True, "done": 0, "total": 0, "msg": "", "error": None}
+        self.job = {"name": name, "running": True, "done": 0, "total": 0, "msg": "", "error": None}  # 新任务从零开始
 
         def progress(done, total, msg=""):
             """任务里调它更新进度"""
@@ -436,7 +436,7 @@ class Session:
             finally:
                 self.job["running"] = False
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run, daemon=True).start()  # daemon: 关掉工具时不用等它
         return {"started": True}
 
     # --- 自动建筑候选 ---
@@ -445,9 +445,10 @@ class Session:
         全图自动找建筑候选（后台任务）。有 SAM 用 SAM 的「按提示点分割」，没有就用颜色连通块兜底。
         交互点选用的 predictor 缓存着当前窗口的图像编码，这里另开一个，互不干扰。
         """
-        seg = self.backend.make_segment_all() if isinstance(self.backend, SamBackend) else None
-        t0 = time.time()
+        seg = self.backend.make_segment_all() if isinstance(self.backend, SamBackend) else None  # None = 颜色连通块兜底
+        t0 = time.time()  # 计时，完成消息里报用时
         found = sg.find_buildings(self.img, self.mpp, seg, stride=stride, progress=lambda a, b: progress(a, b, f"第 {a}/{b} 块"))
+        # 只存界面和接受时用得到的字段；crop 是 (x0, y0, 子掩膜)，几百个候选也就几 MB
         cands = [dict(id=i, crop=c["crop"], score=round(c["score"], 3), area_m2=round(c["feats"]["area_m2"]), state="pending")
                  for i, c in enumerate(found)]
         with self.lock:
@@ -461,7 +462,7 @@ class Session:
         给界面画的候选轮廓: 只列 pending 的，而且已经被标成建筑的（超过一半像素）不再列出。
         轮廓用 approxPolyDP 简化到 1 像素，几百个候选的 json 也就几十 KB。
         """
-        bld = np.isin(self.labels, list(BUILDING_IDS))
+        bld = np.isin(self.labels, list(BUILDING_IDS))  # 当前已标成建筑的像素
         out = []
         for c in self.cands:
             if c["state"] != "pending":
@@ -478,8 +479,8 @@ class Session:
 
     def cand_accept(self, ids, cls, protect=True):
         """把一批候选涂成类别 cls。并成一个掩膜一次涂完 = 一步撤销（「全部接受」按一次 Ctrl+Z 就能撤回）"""
-        want = set(ids)
-        mask = np.zeros((self.h, self.w), bool)
+        want = set(ids)  # 集合查找快
+        mask = np.zeros((self.h, self.w), bool)  # 这批候选的并集
         for c in self.cands:
             if c["id"] in want and c["state"] == "pending":
                 x0, y0, sub = c["crop"]
@@ -501,9 +502,9 @@ class Session:
         Returns: [{cls, crop: (x0, y0, 子掩膜), at: 块内离边最远的点 [x, y], floors: 层数或 None}]
         层数: 落在这栋楼里的 floors 记录，手填的优先，都有就取最大（两栋挨着的楼连成一块时，按高的算）。
         """
-        lab = self.labels if labels is None else labels
+        lab = self.labels if labels is None else labels  # 后台任务传快照进来
         out = []
-        for cls in sorted(BUILDING_IDS):
+        for cls in sorted(BUILDING_IDS):  # 各建筑类别分开算连通块: 商铺挨着住宅也算两栋
             m = (lab == cls).astype(np.uint8)
             if not m.any():
                 continue
@@ -519,7 +520,7 @@ class Session:
         # 层数记录按点归属
         for b in out:
             x0, y0, sub = b["crop"]
-            got = {"manual": [], "auto": []}
+            got = {"manual": [], "auto": []}  # 按来源分开收集
             for f in self.floors:
                 fx, fy = int(f["x"]) - x0, int(f["y"]) - y0
                 if 0 <= fy < sub.shape[0] and 0 <= fx < sub.shape[1] and sub[fy, fx]:
@@ -545,12 +546,12 @@ class Session:
             raise ValueError("先用「校准」工具点墙脚 → 屋顶 → 影子尖，并填层数")
         with self.lock:
             labels = self.labels.copy()  # 快照: 估算期间用户继续编辑也不影响
-        shadow, thr = sg.shadow_mask(self.img)
+        shadow, thr = sg.shadow_mask(self.img)  # 严格的「真阴影」，背光树冠不算
         occ = np.isin(labels, list(BUILDING_IDS))  # 影子落在楼上的部分不算
         blds = self.building_list(labels)
-        res = []
+        res = []  # 新的 auto 记录
         for k, b in enumerate(blds):
-            h, _ = sg.estimate_height(b["crop"], shadow, cal, occ)
+            h, _ = sg.estimate_height(b["crop"], shadow, cal, occ)  # 米；看不出影子时是 None
             if h:
                 res.append({"x": b["at"][0], "y": b["at"][1], "floors": max(1, int(round(h / self.floor_h))), "src": "auto"})
             progress(k + 1, len(blds), f"{k + 1}/{len(blds)} 栋")
@@ -580,7 +581,7 @@ class Session:
                     return True
             return math.hypot(f["x"] - x, f["y"] - y) < 6
 
-        self.floors = [f for f in self.floors if not same(f)]
+        self.floors = [f for f in self.floors if not same(f)]  # 同一栋的旧记录（auto 或 manual）都清掉
         if floors > 0:
             self.floors.append({"x": float(x), "y": float(y), "floors": int(floors), "src": "manual"})
         self._save_meta()
@@ -595,20 +596,25 @@ class Session:
         """
         blds = self.building_list()
         cal = self.cal_vectors()
-        v = cal["v"] if cal else (0.0, 0.0)
+        v = cal["v"] if cal else (0.0, 0.0)  # 倾斜向量（像素/米）
         if not (v[0] or v[1]):
             return self.labels, blds  # 没校准 / 正射图: 剪影就是墙脚
-        med = {}
+        # 同类中位数: 层数和占地面积各一个。中位数只借给「个头差不多」的楼（面积 ≥ 同类中位面积的 40%），
+        # 否则一块没接好的碎片（屋顶设备、半栋楼）也会被当成 19 层，出来一根细高的「铅笔楼」
+        med, med_area = {}, {}
         for cls in BUILDING_IDS:
-            known = [b["floors"] for b in blds if b["cls"] == cls and b["floors"]]
-            med[cls] = int(np.median(known)) if known else None
+            known = [b for b in blds if b["cls"] == cls and b["floors"]]
+            med[cls] = int(np.median([b["floors"] for b in known])) if known else None
+            med_area[cls] = float(np.median([b["crop"][2].sum() for b in known])) if known else 0.0
         out = self.labels.copy()
         for b in blds:
-            fl = b["floors"] or med[b["cls"]]
+            fl = b["floors"]
+            if not fl and med[b["cls"]] and b["crop"][2].sum() >= 0.4 * med_area[b["cls"]]:
+                fl = med[b["cls"]]  # 借同类中位数
             if not fl:
                 continue
             x0, y0, sub = b["crop"]
-            foot = sg.footprint(sub, v, fl * self.floor_h)
+            foot = sg.footprint(sub, v, fl * self.floor_h)  # 沿 −v 腐蚀 楼高 × |v| 像素
             if foot.sum() < 0.3 * sub.sum():
                 continue
             win = out[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]]
@@ -622,7 +628,7 @@ class Session:
 
     def footprint_polys(self):
         """界面预览用: 校正后每栋楼的墙脚轮廓 + 层数"""
-        _, blds = self.corrected_labels()
+        _, blds = self.corrected_labels()  # 和导出同一套计算，预览看到的就是导出的
         out = []
         for b in blds:
             if "foot" not in b:
@@ -777,21 +783,21 @@ def make_handler(S: Session, args):
             if p == "/auto_buildings":  # 后台跑，界面轮询 /job，结束后取 /cands
                 stride = int(q.get("stride", 40))
                 return S.start_job("自动找建筑", lambda prog: S.run_auto_buildings(prog, stride))
-            if p == "/cand_accept":
+            if p == "/cand_accept":  # ids: 候选编号列表；cls: 涂成哪个建筑类别；返回一个 patch（整批一步撤销）
                 return {"ok": True, "patch": S.cand_accept(q["ids"], int(q["cls"]), q.get("protect", True))}
-            if p == "/cand_reject":
+            if p == "/cand_reject":  # 丢掉的候选只是标记为 rejected，缓存里还在，不影响撤销
                 S.cand_reject(q["ids"])
                 return {"ok": True}
-            if p == "/calib":
+            if p == "/calib":  # 校准存进 marks.json，重开工具还在
                 # base / roof / tip 都是图像像素坐标；tip 可以是 null（没有明显影子，只做倾斜校正）
                 S.calib = {"base": q["base"], "roof": q["roof"], "tip": q.get("tip"), "floors": int(q["floors"])}
                 if q.get("floorH"):
                     S.floor_h = float(q["floorH"])
                 S._save_meta()
                 return {"ok": True, "calib": S.calib, "vectors": S.cal_vectors()}
-            if p == "/heights":
+            if p == "/heights":  # 几十栋楼 CPU 上十几秒，也放后台
                 return S.start_job("估算楼高", S.run_heights)
-            if p == "/floors":
+            if p == "/floors":  # 层数工具: 点哪栋改哪栋，floors=0 清除
                 return {"ok": True, "floors": S.set_floors(float(q["x"]), float(q["y"]), int(q["floors"]))}
             if p == "/mpp_zoom":  # 网络地图截图: 纬度 + 缩放级别 → 米/像素
                 S.mpp = sg.mpp_from_zoom(float(q["lat"]), float(q["zoom"]), float(q.get("scale", 1)))

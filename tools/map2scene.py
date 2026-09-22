@@ -1210,20 +1210,35 @@ def main():
             best_b["venue"] = {k_: v[k_] for k_ in ("name", "type", "capacity") if k_ in v}
     # 逐栋楼的层数（sat2marks 用影子估出来的，或者用户手填的）: at 点落在哪栋楼里（容差 3m）就改那栋。
     # 几个点落进同一栋（挨着的楼在标记图上连成了一块）时取最高的，免得一栋高楼被旁边的矮楼拉低
-    got_floors = {}
-    for a in side.get("buildings", []):
+    got_floors = {}  # 楼 id → 层数
+    for a in side.get("buildings", []):  # 每条记录: {at: [x, y] 像素, floors}
         if not a.get("floors"):
-            continue
-        pt = Point(*to_m(a["at"]))
-        hit = [b for b in buildings if b["geom"].distance(pt) <= 3.0]
+            continue  # 没有层数的记录跳过
+        pt = Point(*to_m(a["at"]))  # 像素 → 米
+        hit = [b for b in buildings if b["geom"].distance(pt) <= 3.0]  # 点在楼里或 3m 内（轮廓直角化后边缘会挪一点）
         if hit:
             b = min(hit, key=lambda b_: b_["geom"].distance(pt))  # 离得最近的那栋（在楼里时距离为 0）
             got_floors[b["id"]] = max(got_floors.get(b["id"], 0), int(max(1, round(a["floors"]))))
-    for b in buildings:
+    for b in buildings:  # 写回
         if b["id"] in got_floors:
             b["floors"] = got_floors[b["id"]]
     if side.get("buildings"):
         log(f"sidecar 层数: {len(got_floors)} 栋楼（共 {len(side['buildings'])} 条记录）")
+    # 细长比上限: 楼高不超过最窄边的 8 倍（真实高层住宅的高宽比很少超过 6~7）。
+    # 防的是识别出来的碎片 / 窄条被给了很高的层数，变成一根铅笔立在那里；层高按 3m 算
+    capped = 0  # 被压低的栋数，写日志
+    for b in buildings:
+        if b["kind"] not in ("block", "residential"):
+            continue  # 商铺本来就低、场馆是异形，不管
+        rr = b["geom"].minimum_rotated_rectangle  # 最小外接矩形
+        xs_, ys_ = rr.exterior.coords.xy  # 四个角（首尾重复）
+        short = min(math.hypot(xs_[1] - xs_[0], ys_[1] - ys_[0]), math.hypot(xs_[2] - xs_[1], ys_[2] - ys_[1]))  # 最小外接矩形的短边（米）
+        lim = max(2, int(8 * short / 3.0))  # 层数上限，至少 2 层
+        if b["floors"] > lim:
+            b["floors"] = lim
+            capped += 1
+    if capped:
+        log(f"细长比上限: {capped} 栋楼的层数被压低（楼高 ≤ 8 × 最窄边）")
     # 轨道交通: 线路折线 + 车站，原样透传（只换坐标单位），前端自己画轨道 / 跑车
     transit = None
     if side.get("transit"):

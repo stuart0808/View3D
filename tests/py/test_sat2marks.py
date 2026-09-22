@@ -309,3 +309,17 @@ def test_http_routes(tmp_path):
         assert S.sidecar_file.exists()
     finally:
         srv.shutdown()
+
+
+def test_median_floors_not_lent_to_fragments(tmp_path):
+    img, sil, fp = leaning_image(30)
+    S = make_session(tmp_path, img)
+    S.labels[sil] = 11
+    S.labels[5:9, 5:9] = 11  # 一块碎片（16 像素 < 20 不算楼）
+    S.labels[100:106, 5:12] = 11  # 小碎片: 42 像素，远小于那栋楼
+    S.calib = {"base": [60, 89], "roof": [60, 74], "tip": None, "floors": 10}
+    S.floors = [{"x": 90, "y": 80, "floors": 10, "src": "manual"}]
+    lab, blds = S.corrected_labels()
+    frag = [b for b in blds if b["crop"][1] == 100][0]
+    assert frag["floors"] is None and "foot" not in frag  # 没借中位数，也没被校正
+    assert (lab[100:106, 5:12] == 11).all()
