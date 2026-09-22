@@ -5,7 +5,9 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { CURB_H } from './ground.js'
 
-export const RAIL_H = 11 // 铁路高架的轨面标高，比公路高架 (6.5m) 高一层，可以从它上面跨过去
+import { RAIL_H } from './roads.js'
+import { stationLayouts, buildStationMeshes } from './stations.js'
+export { RAIL_H }
 
 /**
  * 时刻表: [起始小时, 发车间隔(分钟)]，间隔 0 = 停运。想换成真实时刻表，改这里或在 new Transit 时传 timetables。
@@ -39,6 +41,7 @@ export class Transit {
     this.group = new THREE.Group()
     this.group.name = 'transit'
     this.lines = (scene.transit?.lines || []).map((l) => this.#prepareLine(l))
+    this.buildings = scene.buildings || [] // 站前广场选边要看建筑
     this.trains = []
     this.onArrive = null // (stationName, line) => void
     this.#buildStations(nav)
@@ -137,51 +140,8 @@ export class Transit {
       } else add(strips, xray(line.color, 0.55), false)
     }
 
-    // 车站: 地铁 = 叠加的圆环标记 + 地面出入口小亭子；铁路 = 站台雨棚
-    const marks = [], kiosks = [], roofs = [], canopies = []
-    for (const st of this.stations.values()) {
-      const rail = st.lines.find((l) => l.kind === 'rail')
-      if (rail) {
-        const stop = rail.stops.find((q) => q.name === st.name)
-        const p = sample(rail.pts, rail.cum, stop.s)
-        const g = new THREE.BoxGeometry(150, 0.5, 18).toNonIndexed()
-        g.rotateY(Math.atan2(-p.dy, p.dx))
-        g.translate(p.x, RAIL_H + 6, p.y)
-        g.deleteAttribute('uv')
-        canopies.push(g)
-        const plat = new THREE.BoxGeometry(150, 1.1, 17).toNonIndexed()
-        plat.rotateY(Math.atan2(-p.dy, p.dx))
-        plat.translate(p.x, RAIL_H - 0.4, p.y)
-        plat.deleteAttribute('uv')
-        canopies.push(plat)
-      }
-      if (st.lines.some((l) => l.kind === 'metro')) {
-        const ring = new THREE.RingGeometry(st.lines.length > 1 ? 9 : 7, st.lines.length > 1 ? 14 : 11, 24).toNonIndexed()
-        ring.rotateX(-Math.PI / 2)
-        ring.translate(st.pos[0], 0.9, st.pos[1])
-        ring.deleteAttribute('uv')
-        ring.deleteAttribute('normal')
-        marks.push(ring)
-      }
-      for (const [x, z] of st.entrances) {
-        const k = new THREE.BoxGeometry(4.2, 2.5, 2.6).toNonIndexed()
-        k.translate(x, CURB_H + 1.25, z)
-        k.deleteAttribute('uv')
-        kiosks.push(k)
-        const r = new THREE.BoxGeometry(5.0, 0.3, 3.4).toNonIndexed()
-        r.translate(x, CURB_H + 2.7, z)
-        r.deleteAttribute('uv')
-        roofs.push(r)
-      }
-    }
-    if (marks.length) { const m = new THREE.Mesh(mergeGeometries(marks), xray('#ffffff', 0.9)); m.renderOrder = 11; this.group.add(m) }
-    if (kiosks.length) {
-      const k = new THREE.Mesh(mergeGeometries(kiosks), new THREE.MeshStandardMaterial({ color: '#9cc0d6', roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.8 }))
-      const r = new THREE.Mesh(mergeGeometries(roofs), new THREE.MeshStandardMaterial({ color: '#2f6fd0', roughness: 0.6 }))
-      k.castShadow = r.castShadow = true
-      this.group.add(k, r)
-    }
-    if (canopies.length) { const c = new THREE.Mesh(mergeGeometries(canopies), new THREE.MeshStandardMaterial({ color: '#e6e9ed', roughness: 0.8 })); c.castShadow = c.receiveShadow = true; this.group.add(c) }
+    // 车站（出入口亭、高铁站房、综合枢纽）在 stations.js 里画；布局按「有哪些线」自动分类
+    this.group.add(buildStationMeshes(stationLayouts(this.stations, this.buildings)))
   }
 
   #buildTrainMeshes() {

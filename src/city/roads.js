@@ -1,6 +1,7 @@
 // 道路的公共规则。地面标线（ground.js）和车流（traffic.js）都从这里取，保证车走在线里。
 
 export const ELEVATED_H = 6.5 // 高架桥面标高（米）
+export const RAIL_H = 11 // 铁路高架的轨面标高，比公路高架高一层，可以从它上面跨过去
 
 /**
  * 路宽 → 车道划分。offsets[k] = 第 k 条车道中心在「行驶方向右侧」离道路中心线多远。
