@@ -9,21 +9,21 @@ import CityScene from './components/CityScene.vue'
 // 角落里这一小条只是调试用的开关，正式接入时删掉即可，CityScene 本身不带任何 UI。
 // ?scene=xxx 可切换 public/scenes/xxx.json
 // 默认打开城区（环形高架、地铁、铁路、场馆、人群作息都在这个场景里）；街区是早期的小场景，没有这些
-const sceneName = new URLSearchParams(location.search).get('scene') || 'district'
-const SCENES = [{ id: 'district', t: '城区' }, { id: 'demo', t: '街区' }]
-const gotoScene = (id) => (location.search = '?scene=' + id)
+const sceneName = new URLSearchParams(location.search).get('scene') || 'district' // 当前场景名
+const SCENES = [{ id: 'district', t: '城区' }, { id: 'demo', t: '街区' }] // 可选场景（public/scenes/*.json）
+const gotoScene = (id) => (location.search = '?scene=' + id) // 改 URL 整页重载，最省事
 const heat = ref(true) // 热力图开关
 const base = ref(600) // 高峰人数（传给 population）
 // 人数、车流、昼夜都由仿真时钟驱动（src/city/clock.js）。这里只是把时钟显示出来，给几个「跳到某个时刻」的演示按钮
 const rate = ref(10) // 仿真倍速，0 = 暂停
-const RATES = [{ v: 0, t: '暂停' }, { v: 1, t: '1×' }, { v: 10, t: '10×' }, { v: 30, t: '30×' }, { v: 60, t: '60×' }, { v: 120, t: '120×' }]
+const RATES = [{ v: 0, t: '暂停' }, { v: 1, t: '1×' }, { v: 10, t: '10×' }, { v: 30, t: '30×' }, { v: 60, t: '60×' }, { v: 120, t: '120×' }] // 倍速档位
 // 跳时间按钮: 拿到 CityScene 暴露的时钟直接操作；「下一场活动」走引擎（要查需求模型的排期）
 const JUMPS = [
   { t: '早高峰', f: (c) => c.jumpToHour(8) },
   { t: '午间', f: (c) => c.jumpToHour(12.5) },
   { t: '晚高峰', f: (c) => c.jumpToHour(18) },
   { t: '夜晚', f: (c) => c.jumpToHour(21.5) },
-  { t: '下个周末', f: (c) => c.jumpToDayType('weekend', 15) },
+  { t: '下个周末', f: (c) => c.jumpToDayType('weekend', 15) }, // 下午 3 点，人最多
   { t: '下个节假日', f: (c) => c.jumpToDayType('holiday', 15) },
   { t: '下一场活动', f: () => window.__city.jumpToNextEvent() },
 ]
@@ -31,8 +31,8 @@ const setRate = (v) => (rate.value = v)
 const stats = ref(null) // 引擎每秒 emit 的统计
 const city = ref(null) // CityScene 组件引用
 // 点到一栋楼 → 进室内视图；有多种视图（商场 / 地下车库）时用底部的小条切换
-const picked = ref(null)
-const view = ref('')
+const picked = ref(null) // 引擎给的 buildingInfo；null = 没在看室内
+const view = ref('') // 当前室内视图类型
 const VIEW_LABEL = { mall: '商场', garage: '地下车库' }
 /** 引擎点选回调: 这栋楼有可看的室内视图就进第一个 */
 function onSelect(info) {
@@ -50,7 +50,7 @@ function leave() {
   picked.value = null
   city.value.hideInterior()
 }
-window.addEventListener('keydown', (e) => e.key === 'Escape' && picked.value && leave())
+window.addEventListener('keydown', (e) => e.key === 'Escape' && picked.value && leave()) // Esc 退出室内
 
 // 视角按钮（鼠标: 左键旋转 / 右键平移 / 滚轮缩放；键盘: WASD 平移、Q/E 旋转、R/F 俯仰、+/- 缩放、Home 复位）
 const NAV = [
@@ -105,6 +105,7 @@ const onReady = (engine) => (window.__city = engine)
 </template>
 
 <style scoped>
+/* 半透明毛玻璃小条，固定在角落；四条 bar 共用这套样式，各自只覆盖位置 */
 .debug-bar {
   flex-wrap: wrap;
   max-width: calc(100vw - 340px);
@@ -122,11 +123,13 @@ const onReady = (engine) => (window.__city = engine)
   border-radius: 8px;
   user-select: none;
 }
+/* 左上: 人群 / 住户 / 活动 */
 .info-bar {
   bottom: auto;
   top: 12px;
   max-width: calc(100vw - 24px);
 }
+/* 右下: 视角按钮 */
 .nav-bar {
   left: auto;
   right: 12px;
@@ -136,6 +139,7 @@ const onReady = (engine) => (window.__city = engine)
   min-width: 28px;
   font-size: 14px;
 }
+/* 底部居中: 室内视图切换 */
 .interior-bar {
   left: 50%;
   transform: translateX(-50%);

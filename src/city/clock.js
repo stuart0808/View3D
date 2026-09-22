@@ -44,9 +44,9 @@ export class SimClock {
    */
   tick(realDt) {
     if (this.paused) return 0
-    const simDt = realDt * this.rate
-    this.t += simDt * 1000
-    const m = Math.floor(this.t / 60000)
+    const simDt = realDt * this.rate // 仿真秒
+    this.t += simDt * 1000 // 毫秒
+    const m = Math.floor(this.t / 60000) // 当前分钟号
     if (m !== this._lastMinute) {
       const prev = new Date(this._lastMinute * 60000), cur = this.date
       this._lastMinute = m
@@ -57,10 +57,12 @@ export class SimClock {
     return simDt
   }
 
+  /** 通知所有监听者 */
   #emit(ev) { for (const f of this.listeners) f(ev, this) }
   /** 订阅事件，返回取消函数。事件: 'minute' | 'hour' | 'day' | 'jump'（手动跳时间，世界状态不连续） */
   on(f) { this.listeners.add(f); return () => this.listeners.delete(f) }
 
+  /** 当前仿真时刻的 Date 对象 */
   get date() { return new Date(this.t) }
   /** 一天里的小时数，带小数: 18.5 = 18:30 */
   get hour() { const d = this.date; return d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600 }
@@ -76,6 +78,7 @@ export class SimClock {
     return wd === 0 || wd === 6 ? 'weekend' : 'workday'
   }
 
+  /** 今天是什么日子: 'workday' | 'weekend' | 'holiday' */
   get dayType() { return this.dayTypeOf(this.date) }
   /** 交通时刻表只分两套: 工作日 / 节假日（周末按节假日） */
   get timetable() { return this.dayType === 'workday' ? 'workday' : 'holiday' }
@@ -92,8 +95,8 @@ export class SimClock {
   /** 跳到今天（或之后最近一次）的 hour 点；用于演示「看看晚高峰」 */
   jumpToHour(h) {
     const d = this.date
-    const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(h), Math.round((h % 1) * 60), 0)
-    if (target.getTime() <= this.t) target.setTime(target.getTime() + DAY_MS)
+    const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(h), Math.round((h % 1) * 60), 0) // 今天的 h 点（小数转分钟）
+    if (target.getTime() <= this.t) target.setTime(target.getTime() + DAY_MS) // 已经过了就跳到明天
     this.#jump(target.getTime())
   }
 
@@ -103,7 +106,7 @@ export class SimClock {
   /** 跳到下一个指定类型的日子的 hour 点（'workday' | 'weekend' | 'holiday'） */
   jumpToDayType(type, h = 10) {
     const d = this.date
-    for (let i = 1; i < 400; i++) {
+    for (let i = 1; i < 400; i++) { // 最多往后找 400 天（节假日表再稀也够）
       const c = new Date(d.getFullYear(), d.getMonth(), d.getDate() + i, Math.floor(h), Math.round((h % 1) * 60), 0)
       if (this.dayTypeOf(c) === type) return this.#jump(c.getTime())
     }
@@ -135,18 +138,18 @@ const CURVES = {
     cars: [[0, 0.1], [7, 0.12], [10, 0.6], [14, 0.75], [17.5, 0.85], [20, 0.6], [23, 0.2], [24, 0.1]],
   },
 }
-CURVES.holiday = { people: CURVES.weekend.people.map(([h, v]) => [h, Math.min(1, v * 1.15)]), cars: CURVES.weekend.cars }
+CURVES.holiday = { people: CURVES.weekend.people.map(([h, v]) => [h, Math.min(1, v * 1.15)]), cars: CURVES.weekend.cars } // 节假日: 人 +15%（封顶 1），车同周末
 
 /** 某类活动（'people' | 'cars'）在某种日子的某个时刻的强度，0~1 */
 export function activity(kind, dayType, hour) {
   const pts = CURVES[dayType][kind]
-  for (let i = 1; i < pts.length; i++) {
+  for (let i = 1; i < pts.length; i++) { // 找到第一个 ≥ hour 的节点，和前一个之间线性插值
     if (hour <= pts[i][0]) {
       const [h0, v0] = pts[i - 1], [h1, v1] = pts[i]
       return v0 + ((v1 - v0) * (hour - h0)) / (h1 - h0 || 1)
     }
   }
-  return pts[pts.length - 1][1]
+  return pts[pts.length - 1][1] // 超出最后节点取末值
 }
 
 /**

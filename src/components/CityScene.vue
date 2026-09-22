@@ -7,8 +7,9 @@
 import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { CityEngine } from '../city/CityEngine.js'
 
+// 全部 props 都是「声明式」的: 改了就同步到引擎（见下面的 watch）
 const props = defineProps({
-  /** scene.json 的地址；与 scene 二选一 */
+  /** scene.json 的地址；与 scene 二选一（scene 优先） */
   src: { type: String, default: '' },
   /** 直接传入已解析的场景对象 */
   scene: { type: Object, default: null },
@@ -27,7 +28,7 @@ const props = defineProps({
   /** 覆盖 DEFAULT_STYLE 的配色项 */
   styleOverrides: { type: Object, default: null },
 })
-const emit = defineEmits(['ready', 'error', 'stats', 'select'])
+const emit = defineEmits(['ready', 'error', 'stats', 'select']) // 见文件头
 
 const host = ref(null) // 挂载点
 let engine = null // 引擎实例（普通变量，不响应式）
@@ -37,13 +38,13 @@ let statsTimer = 0
 async function reload() {
   if (!engine) return
   try {
-    if (props.scene) engine.load(props.scene)
-    else if (props.src) await engine.loadUrl(props.src)
-    else return
-    if (props.attraction) engine.setAttraction(props.attraction)
-    emit('ready', engine)
+    if (props.scene) engine.load(props.scene) // 同步
+    else if (props.src) await engine.loadUrl(props.src) // fetch + load
+    else return // 两个都没给: 空场景
+    if (props.attraction) engine.setAttraction(props.attraction) // 场景加载后才有人群，吸引力要在这之后套
+    emit('ready', engine) // 父组件拿到引擎（调试用）
   } catch (e) {
-    console.error(e)
+    console.error(e) // 控制台也留一份，方便调试
     emit('error', e)
   }
 }
@@ -58,8 +59,8 @@ onMounted(() => {
   engine.setPopulation(props.population)
   engine.setDwellScale(props.dwellScale)
   engine.setHeatVisible(props.heat)
-  reload()
-  statsTimer = window.setInterval(() => {
+  reload() // 异步，不等
+  statsTimer = window.setInterval(() => { // 每秒一次统计，够界面刷新用，又不会拖慢渲染
     const s = engine?.stats()
     if (s) emit('stats', s)
   }, 1000)
@@ -67,22 +68,22 @@ onMounted(() => {
 
 onBeforeUnmount(() => { // 释放 WebGL 资源和定时器
   clearInterval(statsTimer)
-  engine?.dispose()
-  engine = null
+  engine?.dispose() // 停帧循环、拆场景、摘 canvas
+  engine = null // 之后的 watch 回调都会因为 engine 为空而跳过
 })
 
 // props 变化 → 引擎调用
-watch(() => [props.src, props.scene], reload)
-watch(() => props.population, (v) => engine?.setPopulation(v))
+watch(() => [props.src, props.scene], reload) // 换场景
+watch(() => props.population, (v) => engine?.setPopulation(v)) // 其余都是即时生效的参数
 watch(() => props.dwellScale, (v) => engine?.setDwellScale(v))
 watch(() => props.heat, (v) => engine?.setHeatVisible(v))
 watch(() => props.rate, (v) => engine?.setRate(v))
-watch(() => props.attraction, (v) => v && engine?.setAttraction(v), { deep: true })
+watch(() => props.attraction, (v) => v && engine?.setAttraction(v), { deep: true }) // 对象内部改了也要触发
 
 // 父组件通过 ref 调用: 拿引擎、时钟，开关室内视图，相机旋转 / 平移 / 缩放 / 复位
 defineExpose({
-  getEngine: () => engine,
-  clock: () => engine?.clock,
+  getEngine: () => engine, // 需要更多控制时直接拿引擎
+  clock: () => engine?.clock, // 仿真时钟: jumpToHour / jumpToDayType / setRate
   showInterior: (id, kind) => engine?.showInterior(id, kind),
   orbit: (dAz, dEl) => engine?.orbit(dAz, dEl),
   pan: (r, u) => engine?.pan(r, u),
@@ -97,6 +98,7 @@ defineExpose({
 </template>
 
 <style scoped>
+/* 容器占满父元素；引擎用 ResizeObserver 跟随它的尺寸。overflow hidden 防止 canvas 撑出滚动条 */
 .city-scene {
   position: relative;
   width: 100%;
