@@ -7,6 +7,9 @@
 // 显示方式: 引擎把这栋楼的 bid 写进 hiddenBuilding（buildings.js），楼体、热力层在着色器里被隐藏；
 // 这里在原地 y=0 起建一层室内，镜头推近。退出时整组销毁，楼体恢复。
 // 内部坐标: 二维 (x, y) → 世界 (x, 高度, y)，与别处一致。
+//
+// 对外接口: new Interior(building, kind, opts) → .group 挂到场景；每帧 update(dt, live)；退出 dispose()。
+// 商场的实时人数来自 Crowd.stats().perBuilding，车库的占用来自 Traffic.garageInfo()。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { signedArea, edgeNormal, offsetPolygon, pointInPolygon, interiorPoints, distToPolygonEdge, makeShape, toGround } from './geometry.js'
@@ -27,8 +30,9 @@ export class Interior {
     this.b = building
     this.kind = kind
     this.rand = rand
-    this.group = new THREE.Group()
+    this.group = new THREE.Group() // 所有室内网格都挂在这里，dispose 时整组释放
     this.group.name = `interior:${building.id}:${kind}`
+    // 点是否在楼的轮廓内（挖掉内院）
     this.inside = (x, y) => pointInPolygon(x, y, building.polygon) && !(building.holes || []).some((h) => pointInPolygon(x, y, h))
     if (kind === 'garage') this.#buildGarage(angle, garage)
     else this.#buildMall()
@@ -75,7 +79,7 @@ export class Interior {
     const D = THREE.MathUtils.clamp(reach * 0.5, 3.5, 10)
     this.shopDepth = D
 
-    const area = signedArea(polygon)
+    const area = signedArea(polygon) // 带符号面积，决定外法线方向
     const parts = [], counters = [], tints = [] // 隔墙 / 收银台 / 店铺地面
     this.shopSpots = [] // 每家店 [中心x, 中心y, 向内方向x, y, 开间宽]，室内的人要「站在店里」时用
     const n = polygon.length
@@ -174,6 +178,7 @@ export class Interior {
   #buildGarage(angle, garage) {
     const Y = 0.25
     this.#shell('#565b63', '#3f444b', 0)
+    // 车位布局和 Traffic 用的是同一个函数，所以室内的车位数就是车库容量
     const lay = layoutParking({ polygon: this.b.polygon, holes: this.b.holes || [] }, angle, garage?.entry || null)
     this.stalls = lay.stalls
     // 打乱一次，之后按占用数取前 K 个车位显示，数量变化时不会整体闪动
@@ -215,6 +220,7 @@ export class Interior {
       this.#mesh(edges, '#f0c24b')
     }
 
+    // 每个车位预先写好一辆车的矩阵和颜色，显示时只改 count
     this.cars = new THREE.InstancedMesh(carGeometry(), carMaterial(), Math.max(1, this.stalls.length))
     this.cars.count = 0
     this.cars.castShadow = true
@@ -242,13 +248,14 @@ export class Interior {
     while (this.agents.length < want) this.agents.push(this.#spawnPerson())
     if (this.agents.length > want) this.agents.length = want
     const arr = this.people.instanceMatrix.array
-    const S = 1.25
+    const S = 1.25 // 人的缩放（室内镜头近，人画大一点）
     this.agents.forEach((a, i) => {
       let x = a.x, y = a.y, yaw = a.yaw, bob = 0
       if (!a.still) {
         const total = this.loopCum[this.loopCum.length - 1]
         a.s = (((a.s + a.v * dt) % total) + total) % total // 沿环走，负速度也能回绕
         a.ph += dt * 9
+        // 找到弧长 s 落在走廊折线的哪一段，再按横向偏移 off 站到走廊的一侧
         let k = 1
         while (k < this.loopCum.length - 1 && this.loopCum[k] < a.s) k++
         const p = this.loop[k - 1], q = this.loop[k % this.loop.length]
@@ -270,6 +277,7 @@ export class Interior {
     this.people.instanceMatrix.needsUpdate = true
   }
 
+  /** 释放所有几何体和材质（group 由引擎从场景里摘掉） */
   dispose() {
     this.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose() })
   }

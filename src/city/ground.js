@@ -8,6 +8,7 @@
 //   标线 markings  车道线、中心线、斑马线、停车位线，一个 InstancedMesh；中央隔离带、桥下隔离带另建
 //   高架 elevated  桥面 / 护栏 / 桥墩，标高 ELEVATED_H
 // 所有几何体按材质合并，整层十几个 draw call。
+// 几何体都是从 scene.json 的二维多边形拉伸 / 铺面得来: toGround 把 xy 平面上的形状翻到 xz 地面并抬到指定高度。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { makeShape, toGround, signedArea, edgeNormal } from './geometry.js'
@@ -16,6 +17,9 @@ import { laneLayout, hasMedian, ELEVATED_H } from './roads.js'
 export const CURB_H = 0.18 // 路沿高度（米）: 人行铺装比路面高这么多，行人和路灯、树都立在这个标高上
 
 /**
+ * 建整个地面层，返回一个 Group（名字 'ground'）。
+ * @param scene         scene.json（site / pavement / areas / lanes / crosswalks / elevated / angle）
+ * @param style         配色表 { slab, road, pavement, grass, park, plaza, water, parking, marking, centerLine, underDeck }
  * @param parkingLines  停车位线（Traffic 排好车位后给的，画进标线层）
  * @param railGaps      高架护栏要留缺口的折线（匝道并线段）
  * @param islands       匝道岛（匝道坡体下方 + 空置的匝道车道），并进桥下隔离带
@@ -23,7 +27,7 @@ export const CURB_H = 0.18 // 路沿高度（米）: 人行铺装比路面高这
 export function buildGround(scene, style, parkingLines = [], railGaps = [], islands = []) {
   const group = new THREE.Group()
   group.name = 'ground'
-  const std = (color, rough = 0.95) => new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0 })
+  const std = (color, rough = 0.95) => new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0 }) // 无金属感的哑光材质
 
   // 底座（浅色厚板）+ 路面（整块地块铺深色，人行铺装再盖在上面，天然无缝）
   const slabs = [], roadTops = []
@@ -42,6 +46,7 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
     group.add(road)
   }
 
+  // 人行铺装: 抬高 CURB_H 的薄板，带分缝贴图
   const paves = (scene.pavement || []).map((p) =>
     toGround(new THREE.ExtrudeGeometry(makeShape(p.polygon, p.holes), { depth: CURB_H, bevelEnabled: false }), 0))
   if (paves.length) {
@@ -56,7 +61,7 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
   group.add(buildMarkings(scene, style, parkingLines, islands))
   group.add(buildElevated(scene, style, railGaps))
 
-  // 接住底座影子的透明地面
+  // 接住底座影子的透明地面（只显示阴影的材质），比底座底面还低一点
   const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(6000, 6000), new THREE.ShadowMaterial({ opacity: 0.13 }))
   shadowPlane.rotation.x = -Math.PI / 2
   shadowPlane.position.y = -1.6
@@ -65,11 +70,13 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
   return group
 }
 
-/** 铺装分缝贴图: 一张只有边框的小方块，按世界坐标每 size 米重复一次，并转到街区主方向 */
+/** 铺装分缝贴图: 一张只有边框的小方块，按世界坐标每 size 米重复一次，并转到街区主方向。没有 canvas（测试环境）时返回 null */
 function tileTexture(angle, size = 2.4) {
+  if (typeof document === 'undefined') return null
   const cv = document.createElement('canvas')
   cv.width = cv.height = 64
   const ctx = cv.getContext('2d')
+  if (!ctx) return null
   ctx.fillStyle = '#fff'
   ctx.fillRect(0, 0, 64, 64)
   ctx.strokeStyle = 'rgba(150,150,150,0.35)'
@@ -91,6 +98,7 @@ function tileTexture(angle, size = 2.4) {
 function buildAreas(scene, style) {
   const group = new THREE.Group()
   group.name = 'areas'
+  // 每类区域的画法: height = 抬高的薄板厚度；flat = 直接铺在这个标高的面；tile = 分缝贴图的格子大小
   const SPEC = {
     green: { height: 0.34, color: style.grass, rough: 1 },
     park: { height: 0.24, color: style.park, rough: 1 },
@@ -98,7 +106,7 @@ function buildAreas(scene, style) {
     water: { flat: 0.05, color: style.water, rough: 0.12, metal: 0.25 },
     parking: { flat: 0.012, color: style.parking, rough: 0.95 },
   }
-  for (const [kind, spec] of Object.entries(SPEC)) {
+  for (const [kind, spec] of Object.entries(SPEC)) { // 同类区域合并成一个网格，名字就是类型
     const list = (scene.areas || []).filter((a) => a.kind === kind)
     if (!list.length) continue
     const geos = list.map((a) => {
@@ -141,7 +149,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
       carry = Math.max(0, s - L)
     }
   }
-  for (const lane of scene.lanes || []) {
+  for (const lane of scene.lanes || []) { // 每条路（一条 lane 记录 = 一条路的中心线 + 路宽）
     const y = 0.025 + (lane.level ? ELEVATED_H : 0)
     const { n, laneW, offsets } = laneLayout(lane.width, !!lane.oneway, lane.median || 0)
     if (lane.median) {
@@ -162,6 +170,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
     else stroke(lane.points, 0, 0.2, style.centerLine, true, y)
     for (let k = 1; k < n; k++) for (const sgn of [1, -1]) stroke(lane.points, sgn * k * laneW, 0.18, style.marking, true, y)
   }
+  // 斑马线: 沿过街方向 dir 每 1.1m 一条 0.55m 宽的白条，条数按跨度算
   for (const c of scene.crosswalks || []) {
     const [tx, ty] = c.dir
     const ang = Math.atan2(-ty, tx)
@@ -171,6 +180,7 @@ function buildMarkings(scene, style, parkingLines, islands = []) {
       items.push([c.center[0] - ty * off, c.center[1] + tx * off, ang, c.depth, 0.55, style.marking, 0.025])
     }
   }
+  // 停车位线（Traffic 排好的）
   for (const l of parkingLines) items.push([l.pos[0], l.pos[1], -l.angle, l.length, l.width, style.marking, 0.025])
 
   const group = new THREE.Group()
@@ -282,7 +292,7 @@ export function buildElevated(scene, style, railGaps = []) {
     }
     }
   }
-  // 桥墩: 沿高架中心线每 28m 一根，第一根离路段起点 14m
+  // 桥墩: 沿高架中心线每 28m 一根，第一根离路段起点 14m；acc 跨折线段累计，拐点处不重置
   for (const lane of scene.lanes || []) {
     if (!lane.level) continue
     let acc = 14
@@ -298,6 +308,7 @@ export function buildElevated(scene, style, railGaps = []) {
       acc -= L
     }
   }
+  // 桥面 / 护栏 / 桥墩各合并成一个网格（去 uv、转非索引后才能合并）
   const add = (geos, color) => {
     if (!geos.length) return
     const mesh = new THREE.Mesh(mergeGeometries(geos.map((g) => { g.deleteAttribute('uv'); return g.index ? g.toNonIndexed() : g })), new THREE.MeshStandardMaterial({ color, roughness: 0.9 }))
@@ -311,7 +322,7 @@ export function buildElevated(scene, style, railGaps = []) {
 }
 
 /**
- * 背景楼块。正交相机下没有真正的「远处」，所以雾是假的:
+ * 背景楼块，返回一个 Mesh（名字 'backdrop'）。正交相机下没有真正的「远处」，所以雾是假的:
  * 按离中心的距离把楼块颜色往背景色上混，并让每栋楼从上到下渐隐到背景色。
  */
 export function buildBackdrop(scene, style, rand) {
@@ -326,6 +337,7 @@ export function buildBackdrop(scene, style, rand) {
   const geos = []
   const col = new THREE.Color()
 
+  // 以场景中心为原点、按街区方向旋转的方格网，每格放一个随机大小的楼块
   for (let gj = -range; gj <= range; gj++) {
     for (let gi = -range; gi <= range; gi++) {
       // 在旋转后的网格上摆放，和街区朝向一致
