@@ -377,11 +377,12 @@ def run(image, out_json, mpp=None, geo=None, use_osm=True, method="auto", progre
     scene = json.loads(out_json.read_text("utf-8"))
     # map2scene 的坐标原点在图中心、单位米；卫星图覆盖 [-w/2, w/2] × [-h/2, h/2] 个像素 × mpp
     scene["imagery"] = {"url": base.name, "widthM": round(w * mpp, 2), "heightM": round(h * mpp, 2)}
+    # 摘要要在写文件之前补全: 场景列表（index.json）读的是文件里这份
+    summary.update(buildings=len(scene["buildings"]), lanes=len(scene.get("lanes", [])), seconds=round(time.time() - t0, 1))
     # origin 给 sat_server 的场景列表用（来源文件名 + 摘要），geo 留着以后能再对 OSM
     scene["origin"] = {"source": Path(image).name, "geo": geo, "summary": summary}
     # 紧凑 JSON（无空格）: 大场景的 lanes 很多，能小三成
     out_json.write_text(json.dumps(scene, ensure_ascii=False, separators=(",", ":")), "utf-8")
-    summary.update(buildings=len(scene["buildings"]), lanes=len(scene.get("lanes", [])), seconds=round(time.time() - t0, 1))
     say("完成", 1.0)
     return summary
 

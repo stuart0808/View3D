@@ -12,7 +12,22 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { signedArea, edgeNormal, offsetPolygon, roundPolygon, makeShape, toGround, interiorPoints, distToPolygonEdge } from './geometry.js'
 
-const CORNER_R = 1.6 // 平面轮廓的圆角半径 (m)
+const CORNER_R = 1.6 // 平面轮廓的圆角半径上限 (m)
+// 当前这栋楼实际用的圆角半径: 按楼的尺寸缩放（见 cornerFor）。模块级变量 + 默认参数，
+// 这样 prism / roofCap / eachEdge 的几十处调用不用逐个传参；buildBuildings 在画每栋楼之前设好
+let cornerR = CORNER_R
+
+/**
+ * 圆角半径 = min(1.6m, 最窄处 × 12%)。卫星图自动识别出来的村镇民房只有八九米见方，
+ * 统一 1.6m 的圆角会把它们画成「圆饼」；按尺寸缩放后小房子棱角分明，大楼不变
+ */
+export function cornerFor(poly) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  for (const [x, y] of poly) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y) }
+  // 外接矩形的短边近似「最窄处」；斜着的楼会偏大一点，但只影响圆角大小，无所谓
+  const narrow = Math.min(x1 - x0, y1 - y0, Math.abs(signedArea(poly)) / Math.max(1e-6, Math.max(x1 - x0, y1 - y0)))
+  return Math.max(0.25, Math.min(CORNER_R, narrow * 0.12))
+}
 /** 各类建筑的层高 (m)，楼高 = 层数 × 层高；人群模型算楼层用的也是它 */
 export const FLOOR_H = { shop: 4.4, block: 4.0, residential: 3.1, venue: 4.4 }
 
@@ -97,6 +112,7 @@ export function buildBuildings(scene, nav, rand, style) {
     const mark = Object.values(L).map((l) => l.length), imark = Object.values(I).map((l) => l.length)
     // seed 决定原型和配色: 编号 × 7 + 层数，相邻编号的楼不会是同一套
     const ctx = { L, I, nav, rand, style, seed: bid * 7 + (b.floors || 2) }
+    cornerR = cornerFor(b.polygon) // 这栋楼的圆角（见 cornerFor）
     // 按类型分派；未知 kind 一律当商铺画
     if (b.kind === 'venue') buildVenue(b, ctx)
     else if (b.kind === 'residential') buildResidential(b, ctx)
@@ -146,7 +162,7 @@ export function buildBuildings(scene, nav, rand, style) {
  * @param y0     起始高度 (m)；h 高度 (m)；color 顶点色；r 轮廓圆角半径 (m)
  * @returns 几何体本身，调用方偶尔要再处理
  */
-function prism(list, poly, holes, y0, h, color, r = CORNER_R) {
+function prism(list, poly, holes, y0, h, color, r = cornerR) {
   // curveSegments 1: 圆角只用最少的段数，几千栋楼的顶点数才压得住
   const g = toGround(new THREE.ExtrudeGeometry(makeShape(roundPolygon(poly, r), holes.map((x) => roundPolygon(x, 0.8))), { depth: h, bevelEnabled: false, curveSegments: 1 }), y0)
   list.push(paint(g, color))
@@ -159,7 +175,7 @@ function prism(list, poly, holes, y0, h, color, r = CORNER_R) {
  * @param heat  是否在这块屋面上放热力层（退台楼的露台不放，热力层只放最上面的屋面）
  * @param r     轮廓圆角半径 (m)，要和楼体的 prism 一致，女儿墙才贴得上
  */
-function roofCap(ctx, poly, holes, y, trimColor, heat = true, r = CORNER_R) {
+function roofCap(ctx, poly, holes, y, trimColor, heat = true, r = cornerR) {
   const { L } = ctx
   // 女儿墙环: 外扩 0.4m 做挑檐，内缩 0.55m 是墙厚，两者之间的环就是女儿墙，环内是屋面
   const outer = offsetPolygon(poly, 0.4) || poly
@@ -201,7 +217,7 @@ function setback(poly, d) {
  * @param fn      回调，参数 { i 边号, len 边长, usable 可用长度, start 起点偏移, mid 中点, normal 外法线, place }
  * place 的参数: s 沿边距起点 (m)、yMid 盒子中心高度、w 宽 / h 高 / depth 厚、out 沿外法线外伸 (m)、color、tilt 绕局部 X 的俯仰（遮阳篷用）
  */
-function eachEdge(poly, minLen, fn, corner = CORNER_R) {
+function eachEdge(poly, minLen, fn, corner = cornerR) {
   const area = signedArea(poly), up = new THREE.Vector3(0, 1, 0)
   const n = poly.length
   for (let i = 0; i < n; i++) {
@@ -357,10 +373,10 @@ function buildOffice(b, ctx) {
       const y0 = f0 * fh, th = (t.to - f0) * fh
       if (th <= 0) return // 层数太少时中段可能是空的
       // 偶数段石材 + 窗带，奇数段幕墙 + 竖肋，材质交替；上面的段圆角小 (1.0m)
-      prism(k % 2 ? L.glassy : L.solid, t.poly, t.holes, y0, th, k % 2 ? glassCol : stone, k ? 1.0 : CORNER_R)
+      prism(k % 2 ? L.glassy : L.solid, t.poly, t.holes, y0, th, k % 2 ? glassCol : stone, k ? Math.min(1.0, cornerR) : cornerR)
       if (k % 2 === 0) windowBands(ctx, t.poly, y0, t.to - f0, fh, '#8fa6ba', { height: 2.0, from: k ? 0 : 0 })
       else eachEdge(t.poly, 3, (e) => { const fins = Math.max(2, Math.round(e.usable / 3.2)); for (let j = 0; j <= fins; j++) e.place(I.details, e.start + (e.usable * j) / fins, y0 + th / 2, 0.16, th, 0.4, 0.2, '#e9edf1') }, 1.0)
-      roofCap(ctx, t.poly, t.holes, y0 + th, '#eceef1', k === tiers.length - 1, k ? 1.0 : CORNER_R) // 只有最上一段放热力层
+      roofCap(ctx, t.poly, t.holes, y0 + th, '#eceef1', k === tiers.length - 1, k ? Math.min(1.0, cornerR) : cornerR) // 只有最上一段放热力层
       f0 = t.to
     })
     roofProps(ctx, b, tiers[tiers.length - 1].poly, h, stone)
