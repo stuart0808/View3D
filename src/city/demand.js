@@ -6,6 +6,10 @@
 //   · 场馆活动由日历排期: 进场时段「看演出」的权重暴涨、应有人数上调；观众待到散场，散场后大多直接离开
 // 真实项目里，这些曲线和偏好就是后端测算结果要填的地方。
 
+/**
+ * 四类人群。share 是高峰期各类占总人数的份额；colors 是小人的配色（远看能一眼分出谁是谁）:
+ * 上班族深蓝灰、老年人米色、青年亮色、访客浅色。
+ */
 export const GROUPS = [
   { id: 'worker', label: '上班族', share: 0.5, colors: ['#2f3f5c', '#3b4a63', '#54607a', '#1f2937', '#6b7a94'] },
   { id: 'elderly', label: '老年人', share: 0.15, colors: ['#b79d78', '#c4ad8c', '#9c8a70', '#d2c2a8'] },
@@ -13,7 +17,9 @@ export const GROUPS = [
   { id: 'visitor', label: '访客', share: 0.1, colors: ['#f5f5f4', '#e7e5e4', '#9db4d6', '#c9d6c0'] },
 ]
 
-// 出现曲线: [小时, 0~1]，相对本人群规模的在场比例。rest = 周末和节假日
+// 出现曲线: [小时, 0~1]，相对本人群规模的在场比例。rest = 周末和节假日。
+// 形状是经验值: 上班族工作日 9:30~17:30 满员、休息日很少来核心区；老年人早晚两波（晨练、饭后遛弯）、
+// 午休回家；青年下午到晚上为主、休息日更多；访客白天来、休息日翻倍。接真实数据时替换这些数组。
 const PRESENCE = {
   worker: {
     workday: [[0, 0.02], [6.5, 0.05], [8, 0.7], [9.5, 1], [17.5, 1], [19, 0.55], [21, 0.25], [23, 0.05], [24, 0.02]],
@@ -32,9 +38,13 @@ const PRESENCE = {
     rest: [[0, 0], [9, 0.45], [11, 1], [16, 1], [20, 0.7], [22.5, 0.1], [24, 0]],
   },
 }
-const REST_SCALE = { worker: 1, elderly: 1, youth: 1.15, visitor: 1.6 } // 休息日: 访客和青年的规模更大
+// 休息日各人群的规模倍率: 访客和青年更多，上班族和老年人规模不变（只是曲线不同）
+const REST_SCALE = { worker: 1, elderly: 1, youth: 1.15, visitor: 1.6 }
 
-// 活动偏好: 时段 → { 类别: 权重 }。类别: office / shop / park / plaza / venue / leave
+// 活动偏好: 时段 → { 类别: 权重 }。类别: office / shop / park / plaza / venue / leave。
+// 权重只有相对意义: 一个人结束一段停留后，按当前时段的权重抽下一站的类别，再在该类里按吸引力和距离抽具体地点。
+// 'venue' 不写在表里，进场时段由 crowd.js 按「还差多少观众」动态加上。
+// 结构: MIX[人群][workday|rest|all][时段|all]，'all' 表示不分
 const PERIODS = [[0, 'night'], [6, 'morning'], [11.5, 'noon'], [13.5, 'afternoon'], [17.5, 'evening'], [22, 'night']]
 const MIX = {
   worker: {
@@ -59,13 +69,15 @@ const MIX = {
   visitor: { all: { all: { shop: 4, park: 3, plaza: 3, leave: 1.5 } } },
 }
 
-// 场馆排期规则: 每天每个时段办一场的概率、时长、上座率。type 对应 sidecar 里 venue.type
+// 场馆排期规则: 每天每个时段办一场的概率（workday / rest 分开）、时长（小时）、上座率区间。
+// type 对应 sidecar 里 venue.type；没匹配上的用 default。是否办、办多满由日期哈希决定（见 hash01），
+// 所以同一天怎么跳回来看到的都是同一场。
 const EVENT_RULES = {
   stadium: { slots: [{ h: 19.5, workday: 0.3, rest: 0.75, dur: 2, title: '足球赛' }, { h: 15, workday: 0, rest: 0.5, dur: 2, title: '联赛下午场' }], fill: [0.55, 0.95] },
   opera: { slots: [{ h: 19.5, workday: 0.55, rest: 0.85, dur: 2.5, title: '晚场演出' }, { h: 14.5, workday: 0, rest: 0.6, dur: 2, title: '日场演出' }], fill: [0.6, 1] },
   default: { slots: [{ h: 19, workday: 0.3, rest: 0.6, dur: 2, title: '活动' }], fill: [0.4, 0.9] },
 }
-const INGRESS_MIN = 75, EGRESS_MIN = 35
+const INGRESS_MIN = 75, EGRESS_MIN = 35 // 开场前 75 分钟开始进场，散场后 35 分钟走完
 
 // 住户出行。三条曲线都是 [小时, 值]:
 //   HOME_DEPART  每小时离家的比例（相对此刻在家的人）—— 工作日早高峰集中出门，休息日晚且分散
@@ -84,6 +96,7 @@ const HOME_FRACTION = {
   rest: [[0, 1], [7, 0.95], [10, 0.65], [14, 0.5], [18, 0.55], [21, 0.8], [23, 0.95], [24, 1]],
 }
 
+/** 在 [小时, 值] 节点之间线性插值；超出最后一个节点取末值 */
 function lerpCurve(pts, h) {
   for (let i = 1; i < pts.length; i++) {
     if (h <= pts[i][0]) { const [h0, v0] = pts[i - 1], [h1, v1] = pts[i]; return v0 + ((v1 - v0) * (h - h0)) / (h1 - h0 || 1) }
@@ -113,9 +126,10 @@ export class Demand {
     clock.on((ev) => ev === 'day' && this.#schedule())
   }
 
+  /** 休息日（周末或节假日）: 作息和活动偏好都换成 rest 那套 */
   get rest() { return this.clock.dayType !== 'workday' }
 
-  /** 排今天和明天的场次 */
+  /** 排今天和明天的场次（换日事件时重排，所以「明天」永远有排期，跨夜的散场也不会丢） */
   #schedule() {
     this.events = []
     const d0 = this.clock.date
@@ -136,7 +150,11 @@ export class Demand {
     this.events.sort((a, b) => a.start - b.start)
   }
 
-  /** 某个场馆此刻的活动阶段: null | { ev, phase: 'ingress'|'live'|'egress', progress } */
+  /**
+   * 某个场馆此刻的活动阶段: null | { ev, phase: 'ingress'|'live'|'egress', progress }。
+   * ingress 的 progress 从 0 涨到 1（观众陆续到场），egress 的 progress 从 1 降到 0（陆续离开），live 恒为 1。
+   * 开场后 10 分钟内仍算 ingress（迟到的人）。
+   */
   phaseOf(venueId, t = this.clock.t) {
     for (const ev of this.events) {
       if (ev.venue !== venueId) continue
@@ -147,7 +165,10 @@ export class Demand {
     return null
   }
 
-  /** 各人群此刻应有的在场人数（不含活动观众），base = 高峰人数 */
+  /**
+   * 各人群此刻应有的在场人数（不含活动观众），base = 界面上的「高峰人数」。
+   * = base × 份额 × 休息日倍率 × 节假日访客加成 × 出现曲线。返回数组顺序与 GROUPS 一致
+   */
   targets(base) {
     const key = this.rest ? 'rest' : 'workday', h = this.clock.hour
     return GROUPS.map((g) => Math.round(base * g.share * (this.rest ? REST_SCALE[g.id] : 1) * (this.clock.dayType === 'holiday' && g.id === 'visitor' ? 1.25 : 1) * lerpCurve(PRESENCE[g.id][key], h)))
@@ -160,7 +181,7 @@ export class Demand {
     return Math.round(n)
   }
 
-  /** 第 gi 类人群此刻的活动偏好 { 类别: 权重 } */
+  /** 第 gi 类人群此刻的活动偏好 { 类别: 权重 }。先按 workday/rest 取表，再按时段取行；'all' 表示不分 */
   mix(gi) {
     const m = MIX[GROUPS[gi].id]
     const day = m[this.rest ? 'rest' : 'workday'] || m.all
@@ -178,6 +199,7 @@ export class Demand {
   }
 
   // ---- 住户 ----
+  // 住宅楼里的人不走「出现曲线」，而是按离家率 / 回家率逐个出门、回来（crowd.js 里记账，三态守恒）
   /** 一栋住宅楼里参与仿真的住户数: 建筑面积 / 45㎡ 每人，再乘缩放 */
   residentsOf(area, floors) { return Math.max(4, Math.round(((area * floors) / 45) * this.residentScale)) }
   get #dayKey() { return this.rest ? 'rest' : 'workday' }
