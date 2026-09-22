@@ -455,6 +455,9 @@ def find_buildings(img, mpp, segment_all, tile=1024, overlap=256, stride=40, pro
                 crops.append((c[0] + x0, c[1] + y0, c[2]))  # 块坐标 → 全图坐标
         if progress:
             progress(k + 1, len(boxes))
+    # 修形: SAM 的掩膜常常「漏」进挨着的树冠（屋顶边缘和树冠颜色接近时），把植被像素抠掉，
+    # 开运算断开细连接，只留最大的一块，再填洞（屋顶设备的暗影会留洞）
+    crops = [c for c in (clip_vegetation(c, veg) for c in crops) if c is not None]
     # 打分: 特征只在候选的外接矩形里算
     feats, scores = [], []
     for (cx, cy, sub) in crops:
@@ -464,6 +467,34 @@ def find_buildings(img, mpp, segment_all, tile=1024, overlap=256, stride=40, pro
         scores.append(building_score(f, min_m2=25.0, max_m2=30000.0))
     keep = select_crops(crops, scores, (h, w))
     return [dict(crop=crops[i], feats=feats[i], score=scores[i]) for i in keep]
+
+
+def clip_vegetation(c, veg):
+    """
+    裁剪块去掉植被像素并整理形状: 抠掉植被 → 3×3 开运算 → 只留最大连通块 → 填洞。
+    剩不到原来 40% 的（本来就主要是树）返回 None。
+    """
+    x0, y0, sub = c
+    v = veg[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]]
+    m = (sub & ~v).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # 断开和树冠之间的细连接
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=4)
+    if n < 2:
+        return None
+    k = 1 + int(stats[1:, cv2.CC_STAT_AREA].argmax())  # 最大的一块
+    keep = (lab == k).astype(np.uint8)
+    # 只填小洞（屋顶设备的影子、天窗）: 大洞可能是被包住的院子 / 绿地，填了会把一大片地面当成屋顶
+    cnts, hier = cv2.findContours(keep, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    small = [c_ for i, c_ in enumerate(cnts) if hier[0][i][3] >= 0 and cv2.contourArea(c_) < 0.05 * keep.sum()]
+    cv2.drawContours(keep, small, -1, 1, -1)
+    if keep.sum() < 0.4 * sub.sum():
+        return None
+    return crop_offset(crop(keep > 0), x0, y0)  # 子掩膜坐标 → 全图坐标
+
+
+def crop_offset(c, dx, dy):
+    """裁剪块整体平移 (dx, dy)；None 原样返回"""
+    return None if c is None else (c[0] + dx, c[1] + dy, c[2])
 
 
 def select_crops(crops, scores, shape, max_overlap=0.25):

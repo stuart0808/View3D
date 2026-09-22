@@ -235,3 +235,14 @@ def test_estimate_height_accepts_crop():
     part = sg.estimate_height(sg.crop(sil), dark, dict(v=V, s=S), sil, step=1.5)
     assert full == part  # 裁剪块和全图掩膜结果一致
     assert sg.estimate_height((0, 0, np.zeros((3, 3), bool)), dark, dict(v=V, s=S), sil) == (None, 0.0)
+
+
+def test_clip_vegetation_trims_tree_bleed():
+    veg = np.zeros((H, W), bool)
+    veg[20:60, 100:140] = True  # 楼右边挨着一片树
+    m = rect_mask(20, 20, 140, 60)  # SAM 掩膜: 楼（20~100）+ 漏进树里（100~140）
+    c = sg.clip_vegetation(sg.crop(m), veg)
+    assert c[0] == 20 and c[1] == 20 and c[2].shape == (40, 80)  # 只剩楼
+    assert sg.clip_vegetation(sg.crop(rect_mask(100, 20, 140, 60)), veg) is None  # 全是树: 丢掉
+    holey = rect_mask(20, 20, 100, 60) & ~rect_mask(50, 30, 60, 40)  # 屋顶上有个洞
+    assert sg.clip_vegetation(sg.crop(holey), np.zeros((H, W), bool))[2].all()  # 洞被填上
