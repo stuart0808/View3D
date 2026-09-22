@@ -81,7 +81,7 @@ def shadow_mask(img, thr=None, min_px=30):
     估楼高用的「真阴影」: 比 dark_mask 严格得多。
     高层小区的卫星图里，暗的东西有两类: 楼投下的阴影（大片、平滑、非常暗，亮度 20~40）和
     背光的树冠（斑斑点点，亮度 50~90）。亮度直方图在两者之间有个谷，阈值取这个谷底:
-        先找 [5, 90] 里最高的峰（阴影那一群），再在峰之后 80 个灰度内找最低点。
+        先找 [5, 55] 里最高的峰（阴影那一群），再在峰之后 50 个灰度内找最低点，结果夹在 [25, 65]。
     然后开运算去掉零碎的暗斑、丢掉小于 min_px 的块 —— 剩下的才是楼影。
     Returns: (bool 掩膜, 实际用的阈值)
     """
@@ -89,10 +89,12 @@ def shadow_mask(img, thr=None, min_px=30):
     if thr is None:
         hist = np.bincount(v.ravel(), minlength=256).astype(np.float64)
         hist = np.convolve(hist, np.ones(9) / 9, mode="same")  # 平滑，去掉直方图的锯齿
-        peak = 5 + int(hist[5:91].argmax())  # 最暗的那一群
-        hi = min(255, peak + 80)
+        peak = 5 + int(hist[5:56].argmax())  # 最暗的那一群（楼影亮度通常 15~45）
+        hi = min(255, peak + 50)
         valley = peak + int(hist[peak:hi].argmin())  # 峰后第一个谷
-        thr = float(min(95, max(30, valley)))
+        # 夹在 [25, 65]: 村镇图里没有大片楼影，最暗的一群其实是深色瓦屋顶，谷会找到 90 以上 ——
+        # 那样一半屋顶都算成阴影（实测上海村镇 58% 的像素）。65 以上的一律不当楼影
+        thr = float(min(65, max(25, valley)))
     m = (v < thr).astype(np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))  # 去斑点
     n, lab, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
@@ -421,7 +423,8 @@ def tiles(w, h, size=1024, overlap=256):
 
 def find_buildings(img, mpp, segment_all, tile=1024, overlap=256, stride=40, progress=None):
     """
-    全图自动找建筑候选。
+    全图自动找建筑候选 = segment_raw（慢，SAM 推理）+ pick_buildings（快，打分去重）。
+    分成两步是为了评测 / 调参时把 SAM 的原始结果缓存下来，只反复跑第二步。
     Args:
         img:         BGR 图
         mpp:         米/像素（面积门槛要换成像素）
@@ -432,9 +435,20 @@ def find_buildings(img, mpp, segment_all, tile=1024, overlap=256, stride=40, pro
         progress:    回调 (已完成块数, 总块数)
     Returns: 候选列表 [{crop: (x0, y0, 子掩膜), feats, score}]，已去重，按分数从高到低
     """
+    raw = segment_raw(img, segment_all, tile, overlap, stride, progress)
+    return pick_buildings(img, mpp, raw)
+
+
+def segment_raw(img, segment_all, tile=1024, overlap=256, stride=40, progress=None):
+    """
+    第一步: 分块放提示点、跑分割，收集所有原始掩膜（裁剪块，全图坐标）。参数见 find_buildings。
+    Returns: [(x0, y0, 子掩膜)]，未去重、未修形
+    """
     h, w = img.shape[:2]
     veg = vegetation_mask(img)
-    dark, _ = dark_mask(img)
+    # 排除区用严格的「真阴影」（大片、平滑、很暗），不用 dark_mask: 后者的 Otsu 阈值能到 95，
+    # 会把深灰 / 深红的瓦屋顶（亮度 60~100，国内村镇最常见的屋顶）也当成阴影 —— 实测上海村镇召回因此只有 7%
+    dark, _ = shadow_mask(img)
     exclude = veg | dark
     crops = []
     boxes = tiles(w, h, tile, overlap)
@@ -455,16 +469,27 @@ def find_buildings(img, mpp, segment_all, tile=1024, overlap=256, stride=40, pro
                 crops.append((c[0] + x0, c[1] + y0, c[2]))  # 块坐标 → 全图坐标
         if progress:
             progress(k + 1, len(boxes))
+    return crops
+
+
+def pick_buildings(img, mpp, raw, **score_kw):
+    """
+    第二步: 原始掩膜 → 修形 → 打分 → 去重。score_kw 透传给 building_score（调参用）。
+    Returns: 同 find_buildings
+    """
+    h, w = img.shape[:2]
+    veg = vegetation_mask(img)
+    dark, _ = shadow_mask(img)  # 同 segment_raw: 深色屋顶不算阴影
     # 修形: SAM 的掩膜常常「漏」进挨着的树冠（屋顶边缘和树冠颜色接近时），把植被像素抠掉，
     # 开运算断开细连接，只留最大的一块，再填洞（屋顶设备的暗影会留洞）
-    crops = [c for c in (clip_vegetation(c, veg) for c in crops) if c is not None]
+    crops = [c for c in (clip_vegetation(c, veg) for c in raw) if c is not None]
     # 打分: 特征只在候选的外接矩形里算
     feats, scores = [], []
     for (cx, cy, sub) in crops:
         sh = sub.shape
         f = mask_features(sub, veg[cy:cy + sh[0], cx:cx + sh[1]], dark[cy:cy + sh[0], cx:cx + sh[1]], mpp)
         feats.append(f)
-        scores.append(building_score(f, min_m2=25.0, max_m2=30000.0))
+        scores.append(building_score(f, **score_kw))
     keep = select_crops(crops, scores, (h, w))
     return [dict(crop=crops[i], feats=feats[i], score=scores[i]) for i in keep]
 

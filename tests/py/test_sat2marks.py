@@ -263,7 +263,7 @@ def test_job_runner_reports_progress_and_errors(tmp_path):
 
 
 def test_auto_buildings_without_sam(tmp_path):
-    img = np.full((200, 300, 3), 60, np.uint8)  # 暗底（会被当阴影排除）
+    img = np.full((200, 300, 3), (40, 140, 40), np.uint8)  # 绿地底（植被，会被排除）
     img[20:60, 20:100] = 220  # 两个亮块
     img[100:150, 180:260] = 220
     S = make_session(tmp_path, img)
