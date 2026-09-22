@@ -1,4 +1,13 @@
-// 与框架无关的渲染引擎: 吃一份 scene.json，生成整个三维街区并驱动人群。
+// 与框架无关的渲染引擎: 吃一份 scene.json，生成整个三维城区并驱动人群、车流、轨道交通。
+//
+// 职责（Vue 组件 CityScene.vue 只是它的薄壳）:
+//   · 渲染器 / 正交相机 / 灯光 / 阴影，视角操作（鼠标、键盘、触屏、外部按钮）
+//   · load(): 按依赖顺序把各模块建起来 —— 导航网格 → 红绿灯 → 车流（先建，地面标线要用它排的车位）→ 地面 →
+//     背景 → 建筑 → 轨道交通 → 需求模型 → 人群 → 树 / 路灯 → 热力层
+//   · _tick(): 每帧把现实时间换成仿真时间，切成小步推进所有仿真模块，再渲染
+//   · 环境: 按仿真时钟调人数、车流强度、昼夜光照、路灯
+//   · 点选建筑 → 室内视图；stats() 给界面
+// 所有 Three.js 对象都不进 Vue 的响应式系统（会被 Proxy 拖垮）。
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { NavGrid } from './navgrid.js'
@@ -17,6 +26,7 @@ import { buildTrees } from './props.js'
 import { planLamps, buildLamps } from './lamps.js'
 import { makeRandom } from './geometry.js'
 
+/** 配色。可通过 options.style 局部覆盖 */
 export const DEFAULT_STYLE = {
   background: '#b9c2ce',
   backdrop: '#9aa6b6',
@@ -37,6 +47,11 @@ export const DEFAULT_STYLE = {
 }
 
 export class CityEngine {
+  /**
+   * @param container  挂 canvas 的 DOM 元素，尺寸变化会自动适配
+   * @param options    seed 随机种子 / peopleScale 小人放大 / capacity 人数上限 / clock 时钟参数 /
+   *                   traffic、signals、trees、lamps、demand 为 false 时关掉对应模块 / onSelect 点选回调 / style 配色
+   */
   constructor(container, options = {}) {
     this.container = container
     this.options = { seed: 7, peopleScale: 1.5, capacity: 4000, ...options }
@@ -52,6 +67,7 @@ export class CityEngine {
     this.renderer.domElement.style.display = 'block'
 
     this.scene = new THREE.Scene()
+    // 正交相机: 等轴测的关键。远近的东西一样大，没有透视变形；缩放靠 camera.zoom
     this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 6000)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
@@ -67,6 +83,7 @@ export class CityEngine {
 
     this.hemi = new THREE.HemisphereLight(0xffffff, 0xaab4c2, 1.15)
     this.scene.add(this.hemi)
+    // 太阳: 平行光 + 4096 的软阴影贴图；阴影相机的范围在 #updateShadow 里跟着视野走
     this.sun = new THREE.DirectionalLight(0xfff6ea, 2.1)
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(4096, 4096)
@@ -96,12 +113,14 @@ export class CityEngine {
     this.raf = requestAnimationFrame(this._tick)
   }
 
+  /** 从 URL 加载 scene.json 并 load */
   async loadUrl(url) {
     const res = await fetch(url)
     if (!res.ok) throw new Error(`加载场景失败: ${url} (${res.status})`)
     this.load(await res.json())
   }
 
+  /** 由 scene.json 建整个世界。可重复调用（先 unload）。各模块的建立顺序见文件头 */
   load(sceneData) {
     this.unload()
     const rand = makeRandom(this.options.seed)
@@ -159,6 +178,7 @@ export class CityEngine {
     this.#frameScene(sceneData.bounds)
   }
 
+  /** 拆掉整个世界: 递归释放几何体和材质，各仿真模块 dispose */
   unload() {
     if (!this.world) return
     this.hideInterior(false)
@@ -178,6 +198,7 @@ export class CityEngine {
     this.world = this.heat = this.crowd = this.nav = this.traffic = this.signals = null
   }
 
+  /** 初始取景: 相机对准街区主方向的 45° 斜视，俯角 38°，整个地块刚好装进视口 */
   #frameScene(b) {
     const cx = (b.minX + b.maxX) / 2, cz = (b.minY + b.maxY) / 2
     const radius = Math.hypot(b.maxX - b.minX, b.maxY - b.minY) / 2
@@ -246,15 +267,18 @@ export class CityEngine {
     this.controls.update()
   }
 
+  /** 缩放（乘因子），限制在 minZoom~maxZoom */
   zoomBy(factor) {
     this.camera.zoom = THREE.MathUtils.clamp(this.camera.zoom * factor, this.controls.minZoom, this.controls.maxZoom)
     this.camera.updateProjectionMatrix()
   }
 
+  /** 回到初始取景 */
   resetView() {
     if (this.sceneData) this.#frameScene(this.sceneData.bounds)
   }
 
+  /** 键盘: canvas 可聚焦，按下的键记在 this.keys 里，#applyKeys 每帧按住持续运动 */
   #bindKeys() {
     const el = this.renderer.domElement
     el.tabIndex = 0
@@ -286,6 +310,7 @@ export class CityEngine {
   // -------------------------------------------------------------------------
   // 点选建筑 / 室内视图
   // -------------------------------------------------------------------------
+  /** 点选: 按下和抬起位置相差 5px 以内算点击，射线打到建筑网格后从 bid 属性读出是哪栋楼 */
   #bindPicking() {
     const el = this.renderer.domElement
     const ray = new THREE.Raycaster(), ndc = new THREE.Vector2()
@@ -317,6 +342,7 @@ export class CityEngine {
     return { id, kind: b.kind, floors: b.floors, views, visitors: this.crowd?.buildings.get(id)?.visitors ?? 0, garage: garage && { capacity: garage.capacity, occupied: garage.occupied } }
   }
 
+  /** 进入某栋楼的室内视图（'mall' | 'garage'）: 隐藏楼体、原地建室内、镜头推近；再次调用会切换视图但保留原视角 */
   showInterior(id, kind = 'mall') {
     const idx = this.sceneData.buildings.findIndex((x) => x.id === id)
     if (idx < 0) return
@@ -335,6 +361,7 @@ export class CityEngine {
     this.#flyTo((minX + maxX) / 2, (minY + maxY) / 2, Math.min(12, (this.camera.top * 2) / (size * 1.5))) // 正交相机: 可见高度 = 视口高 / zoom
   }
 
+  /** 退出室内视图，恢复楼体，可选飞回原视角 */
   hideInterior(restoreCamera = true) {
     if (!this.interior) return
     hiddenBuilding.value = -1
@@ -379,30 +406,35 @@ export class CityEngine {
     if (glass) { glass.material.emissive.set('#ffd9a0'); glass.material.emissiveIntensity = (1 - dl) * 0.85 } // 夜里亮窗
   }
 
+  /** 店内停留时长倍率 */
   setDwellScale(s) {
     this._dwellScale = s
     if (this.crowd) this.crowd.dwellScale = s
   }
 
+  /** { 建筑id: 吸引力 }，接后端的客流 / 消费测算结果 */
   setAttraction(map) { this.crowd?.setAttraction(map) }
 
+  /** 显示 / 隐藏屋顶热力图 */
   setHeatVisible(v) {
     this.heatVisible = v
     if (this.heat) this.heat.mesh.visible = v
   }
 
-  /** 仿真速度（倍）。0 = 暂停 */
-  /** 跳到下一场场馆活动开始进场的时候 */
+  /** 跳到下一场场馆活动开始进场的时候；没有排期返回 false */
   jumpToNextEvent() {
     const t = this.demand?.nextIngress()
     if (t) this.clock.jumpTo(t)
     return !!t
   }
 
+  /** 仿真速度（倍）。0 = 暂停 */
   setRate(r) { this.clock.paused = r <= 0; if (r > 0) this.clock.setRate(r) }
 
+  /** 给界面的统计: 人群各项 + 时钟标签 + 在途车数 + 轨道交通 */
   stats() { return this.crowd ? { ...this.crowd.stats(), clock: this.clock.label, dayType: this.clock.dayType, cars: this.traffic?.roadCount ?? 0, transit: this.transit?.stats() || null } : null }
 
+  /** 容器尺寸变化: 重设渲染尺寸；正交相机的视口按 fit 适配，宽高两个方向都要装得下地块 */
   _resize() {
     const w = this.container.clientWidth || 1, h = this.container.clientHeight || 1
     this.renderer.setSize(w, h)
