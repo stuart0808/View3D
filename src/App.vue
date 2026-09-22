@@ -108,6 +108,8 @@ const onImported = (j) => setTimeout(() => gotoScene(j.scene), 600) // 处理完
     <button @click="importing = !importing">导入卫星图</button>
     <!-- 实地标注: 手机上打开同一场景，标商户门口 / 临街范围（src/survey/） -->
     <a class="survey-link" :href="`/survey.html?scene=${sceneName}`" target="_blank">实地标注</a>
+    <!-- 场景编辑器: 在当前场景上改路 / 楼，或者新建一张（src/editor/） -->
+    <a class="survey-link" :href="`/editor.html?scene=${sceneName}`" target="_blank">编辑场景</a>
     <!-- 卫星底图开关: 只有导入的场景有底图 -->
     <label v-if="hasImagery"><input :checked="imagery" type="checkbox" @change="setImagery($event.target.checked)" /> 卫星底图</label>
     <!-- 仿真时钟: 日期 · 日子类型 · 时刻 -->
