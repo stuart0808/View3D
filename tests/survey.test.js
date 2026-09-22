@@ -186,6 +186,37 @@ describe('导出', () => {
     expect(lines[0]).toMatch(/^编号,楼,网格,店名/) // 表头
     // 店名里有逗号和引号: 整格加引号、引号写两遍；门口取第一扇门；两扇门；临街 10 米
     expect(lines[1]).toContain('"店, ""老字号"""')
-    expect(lines[1]).toContain(',7,10,2,10,甲,')
+    expect(lines[1]).toContain(',7,10,南,2,,10,甲,') // 门口、朝向（按法线换算）、门数、面积（旧版没有）、临街长度
+  })
+
+  it('涂色板商户: 色块轮廓导出成闭合多边形（外环反向），门带朝向，CSV 有面积', () => {
+    const s = { ...M.emptySurvey('d'), shops: [{ id: 'p1', color: 2, seed: [0, 0], area: 6, name: '书店', category: 'retail', doors: [{ i: 3, j: 1, dir: 'E', pos: [3, 1], normal: [1, 0] }] }] }
+    const outlines = new Map([['p1', { outer: [[[0, 0], [3, 0], [3, 2], [0, 2]]], holes: [] }]]) // 3 × 2 的色块
+    const g = M.toGeoJSON(s, null, outlines)
+    expect(g.features.map((f) => f.properties.feature)).toEqual(['shop', 'door'])
+    expect(g.features[0].geometry.coordinates).toEqual([[[0, 2], [3, 2], [3, 0], [0, 0], [0, 2]]]) // 反向 + 首尾相同
+    expect(g.features[0].properties.area).toBe(6)
+    expect(g.features[1].properties.facing).toBe('东')
+    expect(M.toCSV(s, null).split('\r\n')[1]).toContain(',3,1,东,1,6,,') // 门口 (3, 1)、朝东、1 扇门、6 ㎡、没有临街长度
+  })
+})
+
+describe('涂色板分块与朝向名', () => {
+  it('写分块: 每块带人和时间，一笔一条日志，旧版数据升到第 2 版', () => {
+    const old = { version: 1, scene: 'd', cells: {}, shops: [], log: [] } // 旧版: 没有 tiles
+    const s = M.setTiles(old, { B03: '1x2500', A01: '0x2500' }, '甲', 7)
+    expect(s.version).toBe(2)
+    expect(s.tiles.B03).toEqual({ rle: '1x2500', by: '甲', t: 7 })
+    expect(s.log).toEqual([{ t: 7, by: '甲', action: 'paint', id: 'A01 B03' }])
+    expect(M.setTiles(s, {}, '甲', 8).log).toHaveLength(1) // 没改块不记日志
+    expect(old.tiles).toBeUndefined() // 原对象没被改
+    expect(M.emptySurvey('x')).toMatchObject({ version: 2, tiles: {} })
+  })
+
+  it('朝向名: 有 dir 用 dir，没有按法线的主方向', () => {
+    expect(M.dirName({ dir: 'N' })).toBe('北')
+    expect(M.dirName({ normal: [-0.9, 0.3] })).toBe('西')
+    expect(M.dirName({ normal: [0.2, -0.8] })).toBe('北')
+    expect(M.dirName(null)).toBe('')
   })
 })

@@ -2,8 +2,9 @@
 //   网格        场景切成固定边长的方格，编号 A01、B07……，给考察人员分工、记进度
 //   坐标        场景米 ⇄ 经纬度（Web 墨卡托截图 / 经纬度网格两种地理参考，可带 GCJ-02 火星坐标）
 //   吸附        手点的位置吸到楼的外墙上，算出门朝外的方向；两点之间沿外墙取一段当「临街范围」
-//   标注数据    商户增改删（删除留墓碑）、格子状态、操作日志
+//   标注数据    商户增改删（删除留墓碑）、格子状态、涂色板分块、操作日志
 //   导出        GeoJSON（给 GIS / 甲方）和 CSV（给表格）
+// 涂色板本身（1 米格、划区、连通块、门口）在 board.js；这里的「吸附到外墙」是旧版按楼标门时用的，场景编辑器还在用。
 // 场景坐标约定和 tools/map2scene.py 一致: 原点在原图中心，单位米，x 向东、y 向南（图像的 y 向下）。
 
 // ---------------------------------------------------------------------------
@@ -286,9 +287,24 @@ export const CELL_STATUS = [
   { id: 'review', t: '待复核' },
 ]
 
-/** 空白标注数据；scene = 场景 id（'district'、'imported/xxx'） */
+/**
+ * 空白标注数据；scene = 场景 id（'district'、'imported/xxx'）
+ * 第 2 版加了 tiles: 涂色板按 50 米分块的游程编码 {块编号: {rle, by, t}}（见 board.js），同步时按块取新
+ */
 export function emptySurvey(scene) {
-  return { version: 1, scene, cells: {}, shops: [], log: [] }
+  return { version: 2, scene, cells: {}, tiles: {}, shops: [], log: [] }
+}
+
+/**
+ * 涂色板改了一笔后，把涉及的块写进标注数据（整块替换，记标注人和时间；一笔记一条日志）
+ * @param tiles {块编号: 游程编码}
+ * @returns 新的 survey（不改原对象）
+ */
+export function setTiles(survey, tiles, by = '', now = Date.now()) {
+  const next = { ...(survey.tiles || {}) } // 旧版数据没有 tiles
+  for (const [id, rle] of Object.entries(tiles)) next[id] = { rle, by, t: now } // 每块单独带时间，合并时按块比
+  const ids = Object.keys(tiles).sort().join(' ') // 日志里记改了哪几块
+  return { ...survey, version: 2, tiles: next, log: ids ? [...survey.log, { t: now, by, action: 'paint', id: ids }] : survey.log }
 }
 
 /** 新商户的编号: 时间 + 随机数，几台手机同时标也不会撞（合并时按编号对齐） */
@@ -340,20 +356,34 @@ export function catName(id) {
   return CATEGORIES.find((c) => c.id === id)?.t || id || ''
 }
 
+/** 门朝向的中文名（涂色板的门有 dir；旧版按楼标的门只有法线，按法线换算） */
+export function dirName(d) {
+  const names = { E: '东', S: '南', W: '西', N: '北' } // 和 board.js 的 DIR_NAME 一致
+  if (d?.dir) return names[d.dir] || ''
+  if (!d?.normal) return ''
+  const [x, y] = d.normal // y 向南
+  return Math.abs(x) >= Math.abs(y) ? (x > 0 ? '东' : '西') : y > 0 ? '南' : '北' // 取绝对值大的分量
+}
+
 /**
- * 导出 GeoJSON: 每家店一个门口点（每扇门一个）+ 一条临街线（有的话）
+ * 导出 GeoJSON: 每家店的色块轮廓（多边形，涂色板商户才有）+ 每扇门一个点 + 一条临街线（旧版数据才有）
  * 场景有地理位置时坐标是 WGS84 经纬度（crs = EPSG:4326）；没有时是场景米（crs = scene-m）
+ * @param outlines 可选，商户编号 → {outer, holes}（board.outline 的结果，页面上现算好传进来）
  */
-export function toGeoJSON(survey, geo) {
+export function toGeoJSON(survey, geo, outlines = null) {
   // 经纬度保留 7 位小数 ≈ 1 厘米
   const P = (p) => (geo ? geo.toLonLat(p[0], p[1]).map((v) => Math.round(v * 1e7) / 1e7) : p)
+  // GeoJSON 要求环首尾相同、外环逆时针（北在上看）；轮廓在 y 向南的场景里是顺时针，反过来就行
+  const ring = (r) => { const q = [...r].reverse().map(P); return [...q, q[0]] }
   const features = []
   for (const s of liveShops(survey)) {
     const props = {
-      id: s.id, building: s.building, name: s.name || '', category: catName(s.category), floor: s.floor || '',
-      hours: s.hours || '', note: s.note || '', cell: s.cell || '', by: s.by || '', time: s.t ? new Date(s.t).toISOString() : '',
+      id: s.id, building: s.building || '', name: s.name || '', category: catName(s.category), floor: s.floor || '',
+      hours: s.hours || '', note: s.note || '', cell: s.cell || '', area: s.area ?? '', by: s.by || '', time: s.t ? new Date(s.t).toISOString() : '',
     }
-    for (const d of s.doors || []) features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: P(d.pos) }, properties: { ...props, feature: 'door', normal: d.normal } })
+    const o = outlines?.get(s.id) // 这家店的色块轮廓
+    if (o?.outer?.length) features.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring(o.outer[0]), ...o.holes.map(ring)] }, properties: { ...props, feature: 'shop' } })
+    for (const d of s.doors || []) features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: P(d.pos) }, properties: { ...props, feature: 'door', normal: d.normal, facing: dirName(d) } })
     if (s.frontage?.length >= 2) features.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: s.frontage.map(P) }, properties: { ...props, feature: 'frontage' } })
   }
   return { type: 'FeatureCollection', crs: geo ? 'EPSG:4326' : 'scene-m', scene: survey.scene, features }
@@ -370,11 +400,11 @@ function csvCell(v) {
  * 有地理位置时给经纬度，没有时给场景米
  */
 export function toCSV(survey, geo) {
-  const head = ['编号', '楼', '网格', '店名', '业态', '楼层', '营业时间', '备注', geo ? '门口经度' : '门口x(米)', geo ? '门口纬度' : '门口y(米)', '门数', '临街长度(米)', '标注人', '时间']
+  const head = ['编号', '楼', '网格', '店名', '业态', '楼层', '营业时间', '备注', geo ? '门口经度' : '门口x(米)', geo ? '门口纬度' : '门口y(米)', '门朝向', '门数', '面积(㎡)', '临街长度(米)', '标注人', '时间']
   const rows = liveShops(survey).map((s) => {
     const d = s.doors?.[0]
     const p = d ? (geo ? geo.toLonLat(d.pos[0], d.pos[1]).map((v) => v.toFixed(7)) : d.pos) : ['', '']
-    return [s.id, s.building, s.cell || '', s.name || '', catName(s.category), s.floor || '', s.hours || '', s.note || '', p[0], p[1], (s.doors || []).length, s.frontageLen ?? '', s.by || '', s.t ? new Date(s.t).toISOString() : '']
+    return [s.id, s.building || '', s.cell || '', s.name || '', catName(s.category), s.floor || '', s.hours || '', s.note || '', p[0], p[1], dirName(d), (s.doors || []).length, s.area ?? '', s.frontageLen ?? '', s.by || '', s.t ? new Date(s.t).toISOString() : '']
   })
   return '﻿' + [head, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n')
 }
