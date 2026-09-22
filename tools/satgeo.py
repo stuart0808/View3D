@@ -326,14 +326,28 @@ def estimate_height(silhouette, dark, cal, occluders, h_min=3.0, h_max=180.0, st
     if not cal or cal.get("s") is None:
         return None, 0.0
     v, s = cal["v"], cal["s"]
+    # 剪影可以是全图掩膜，也可以是裁剪块 (x0, y0, 子掩膜)（大图上逐栋算时不必每栋都分配一张全图）
+    if isinstance(silhouette, tuple):
+        cx, cy, sub = silhouette
+        if not sub.any():
+            return None, 0.0
+        bx0, by0, bx1, by1 = cx, cy, cx + sub.shape[1] - 1, cy + sub.shape[0] - 1
+    else:
+        ys, xs = np.nonzero(silhouette)
+        if not len(xs):
+            return None, 0.0
+        bx0, by0, bx1, by1 = xs.min(), ys.min(), xs.max(), ys.max()
     # 只在剪影周围一个窗口里算，整张图上做平移太慢
-    ys, xs = np.nonzero(silhouette)
-    if not len(xs):
-        return None, 0.0
+    H_, W_ = dark.shape
     reach = h_max * max(math.hypot(*s), math.hypot(*v)) + 4  # 影子 / 倾斜最远能伸多少像素
-    x0, x1 = int(max(0, xs.min() - reach)), int(min(silhouette.shape[1], xs.max() + reach + 1))
-    y0, y1 = int(max(0, ys.min() - reach)), int(min(silhouette.shape[0], ys.max() + reach + 1))
-    sil, dk, occ = silhouette[y0:y1, x0:x1], dark[y0:y1, x0:x1], occluders[y0:y1, x0:x1]
+    x0, x1 = int(max(0, bx0 - reach)), int(min(W_, bx1 + reach + 1))
+    y0, y1 = int(max(0, by0 - reach)), int(min(H_, by1 + reach + 1))
+    if isinstance(silhouette, tuple):
+        sil = np.zeros((y1 - y0, x1 - x0), bool)
+        sil[cy - y0:cy - y0 + sub.shape[0], cx - x0:cx - x0 + sub.shape[1]] = sub  # 把裁剪块放进窗口
+    else:
+        sil = silhouette[y0:y1, x0:x1]
+    dk, occ = dark[y0:y1, x0:x1], occluders[y0:y1, x0:x1]
     area = float(sil.sum())
     cache = {}  # h → 得分；墙脚太小的记 None
 

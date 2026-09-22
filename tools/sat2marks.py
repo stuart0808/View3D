@@ -19,11 +19,23 @@ sat2marks.py —— 卫星图半自动标注工具（本地网页）。产出与
     Session    标注状态: labels（每像素一个类别 id）、dots（门 / 出入口点）、撤销栈；可保存 / 续标；导出标记图
     HTTP       一个极简的本地服务: GET 静态页 / 图片 / 状态，POST 各种编辑动作（见 make_handler.route）
     界面       tools/sat2marks_ui.html（纯前端，画布叠加标记层，逐块 patch 更新）
-产物: <图名>_labels.png（类别 id 图，续标用）、<图名>_marks.json（点 + 比例尺）、<图名>_marks.png（给 map2scene 的标记图）
+产物: <图名>_labels.png（类别 id 图，续标用）、<图名>_marks.json（点 + 比例尺 + 校准 + 层数）、
+      <图名>_marks.png（给 map2scene 的标记图）、<图名>_marks.sidecar.json（逐栋层数）、<图名>_cands.pkl（候选缓存）
+
+推荐流程（高层小区这类图最省事）:
+    1. 比例尺: 知道截图的缩放级别就填「纬度 + 级别」，否则用标尺量一段已知长度
+    2. 「自动找建筑」→ 候选工具里点一下接受 / 右键丢掉，或者「全部接受」
+    3. 植被一键提取；路用画线工具描
+    4. 「校准」: 选一栋看得清的楼，依次点 墙脚角 → 对应的屋顶角 → 那个屋顶角的影子尖，填它的层数
+    5. 「估算楼高」: 每栋楼按影子估层数；不对的用「层数」工具点楼改
+    6. 生成场景: 导出时自动把 屋顶 + 立面 校正成墙脚，层数写进 sidecar
 """
 import argparse
 import base64  # 掩膜 / 补丁图以 base64 PNG 发给前端
 import json
+import math
+import os
+import pickle  # 自动建筑候选的缓存
 import subprocess  # 导出时调 map2scene.py
 import sys
 import threading
@@ -36,6 +48,8 @@ import cv2
 import numpy as np
 
 HERE = Path(__file__).resolve().parent  # tools/ 目录，找 ui.html 和 map2scene.py 用
+sys.path.insert(0, str(HERE))
+import satgeo as sg  # noqa: E402  自动候选 / 倾斜校正 / 影子估高
 
 # id 0 = 未标记。颜色必须与 map2scene.py 的 DEFAULT_MARKERS 一致。
 CLASSES = [  # id 写进 labels.png；key / label 给前端按钮；color 是导出标记图的颜色
@@ -118,8 +132,27 @@ class SamBackend:
         self.win = None  # 当前已编码的窗口 (x0, y0, x1, y1)
         is_sam2 = "sam2" in Path(model).name.lower()  # SAM2 用另一个 Predictor 类
         cls = usam.SAM2Predictor if is_sam2 and hasattr(usam, "SAM2Predictor") else usam.Predictor
-        self.predictor = cls(overrides=dict(conf=0.25, task="segment", mode="predict", imgsz=1024, model=model, device=device, save=False, verbose=False))  # 不存文件、不打日志
+        self.overrides = dict(conf=0.25, task="segment", mode="predict", imgsz=1024, model=model, device=device, save=False, verbose=False)  # 不存文件、不打日志
+        self.predictor_cls = cls
+        self.predictor = cls(overrides=self.overrides)
         self.name = f"{Path(model).stem} @ {device}"  # 如 mobile_sam @ cpu
+
+    def make_segment_all(self):
+        """
+        给 satgeo.find_buildings 用的分割函数: (块图像, 提示点 (N,2)) → 掩膜列表。
+        另建一个 predictor —— 交互点选那个缓存着当前窗口的图像编码，共用会互相冲掉。
+        提示点换成 SAM 要的归一化坐标: 图先按长边缩放到 1024 再补边成正方形，所以统一除以长边。
+        """
+        pred = self.predictor_cls(overrides=self.overrides)
+
+        def run(tile, pts):
+            th, tw = tile.shape[:2]
+            r = pred(source=np.ascontiguousarray(tile), point_grids=[np.asarray(pts, np.float64) / max(th, tw)], points_batch_size=128)
+            if not r or r[0].masks is None:
+                return []
+            return [m[:th, :tw] for m in (r[0].masks.data.cpu().numpy() > 0)]  # 保险: 裁到块大小
+
+        return run
 
     def _window_for(self, points):
         """决定推理窗口: 图不大就整张；点都落在当前窗口内部（留 12% 边）就复用；否则以第一个点为中心开新窗"""
@@ -234,7 +267,14 @@ def auto_vegetation(img, mpp, thr=0.06, min_area_m2=25.0, park_area_m2=1500.0, p
 # 会话状态
 # ----------------------------------------------------------------------------
 class Session:
-    """一张图的标注状态。labels 是 uint8 类别图（0 = 未标记），所有编辑都经过 paint() 以便撤销"""
+    """
+    一张图的标注状态。labels 是 uint8 类别图（0 = 未标记），所有编辑都经过 paint() 以便撤销。
+    除了逐像素的类别，还有几样「矢量」信息（都存在 marks.json 里，续标时恢复）:
+        dots    门 / 出入口点
+        calib   倾斜 / 影子校准: 一栋楼的 墙脚点 base、屋顶点 roof、影子尖 tip、层数 floors
+        floors  逐栋层数 [{x, y, floors, src: 'auto' 影子估的 | 'manual' 手填的}]，按点落在哪栋楼里对应
+    自动建筑候选（cands）算一次要几十秒，单独缓存在 <图名>_cands.pkl。
+    """
 
     def __init__(self, image_path, args):
         self.path = Path(image_path)
@@ -243,19 +283,24 @@ class Session:
         self.mpp = args.mpp or ((args.width_m / self.w) if args.width_m else 0.3)  # 米/像素，默认 0.3（常见卫星图级别）
         self.out_dir = Path(args.out_dir) if args.out_dir else self.path.parent  # 产物默认和图片放一起
         self.stem = self.path.stem  # 产物文件名前缀
-        self.labels = np.zeros((self.h, self.w), np.uint8) # 每像素类别 id
-        self.dots = [] # [{kind: door|portal, x, y}]
-        self.undo = [] # 撤销栈: ('patch', x0, y0, 旧像素块) 或 ('dot',)
-        self.preview = None # 分割出来但还没提交的掩膜
+        self.labels = np.zeros((self.h, self.w), np.uint8)  # 每像素类别 id
+        self.dots = []  # [{kind: door|portal, x, y}]
+        self.undo = []  # 撤销栈: ('patch', x0, y0, 旧像素块) 或 ('dot',)
+        self.preview = None  # 分割出来但还没提交的掩膜
         self.preview_points = []
+        self.calib = None  # 倾斜 / 影子校准，见类说明
+        self.floor_h = 3.0  # 层高（米），层数 ↔ 楼高换算
+        self.floors = []  # 逐栋层数
+        self.cands = []  # 自动建筑候选 [{id, crop, score, area_m2, state: pending|accepted|rejected}]
+        self.job = {"name": None, "running": False, "done": 0, "total": 0, "msg": "", "error": None}  # 后台任务进度
         self.lock = threading.Lock()  # HTTP 是多线程的，编辑操作串行化
         self.backend = make_backend(self.img, args)
         self._load()  # 续标
-        self.lut = np.zeros((256, 4), np.uint8) # 类别 id → BGRA，未标记透明
+        self.lut = np.zeros((256, 4), np.uint8)  # 类别 id → BGRA，未标记透明
         for c in CLASSES:
             self.lut[c["id"]] = (*hex_bgr(c["color"]), 255)
 
-    # --- 断点续标: 三个产物文件的路径 ---
+    # --- 断点续标: 产物文件的路径 ---
     @property
     def labels_file(self):
         return self.out_dir / f"{self.stem}_labels.png"
@@ -268,8 +313,17 @@ class Session:
     def marks_file(self):
         return self.out_dir / f"{self.stem}_marks.png"
 
+    @property
+    def sidecar_file(self):
+        """给 map2scene 的 sidecar（逐栋层数），导出时写"""
+        return self.out_dir / f"{self.stem}_marks.sidecar.json"
+
+    @property
+    def cands_file(self):
+        return self.out_dir / f"{self.stem}_cands.pkl"
+
     def _load(self):
-        """同目录下有上次的 labels.png + marks.json 且尺寸一致就载入，断点续标"""
+        """同目录下有上次的 labels.png + marks.json 且尺寸一致就载入，断点续标；候选缓存另外读"""
         if self.labels_file.exists() and self.meta_file.exists():
             lab = cv2.imdecode(np.fromfile(str(self.labels_file), np.uint8), cv2.IMREAD_GRAYSCALE)  # 类别 id 图是单通道 png
             if lab is not None and lab.shape == self.labels.shape:  # 尺寸对不上说明换了图，不载入
@@ -277,19 +331,46 @@ class Session:
                 meta = json.loads(self.meta_file.read_text("utf-8"))
                 self.dots = meta.get("dots", [])  # 门 / 出入口点
                 self.mpp = meta.get("mpp", self.mpp)  # 上次校准过的比例尺
+                self.calib = meta.get("calib")
+                self.floor_h = meta.get("floorH", self.floor_h)
+                self.floors = meta.get("floors", [])
                 print(f"[sat2marks] 已载入上次的标注 {self.labels_file.name}")
+        if self.cands_file.exists():
+            try:
+                with open(self.cands_file, "rb") as f:
+                    data = pickle.load(f)
+                if data.get("shape") == (self.h, self.w):  # 换了图就作废
+                    self.cands = data["cands"]
+                    print(f"[sat2marks] 已载入 {len(self.cands)} 个建筑候选")
+            except Exception as e:  # 缓存坏了不影响标注
+                print(f"[sat2marks] 候选缓存读不了（{e}），忽略")
 
-    def save(self):
-        """写 labels.png / marks.json，并渲染 map2scene 用的标记图（类别色 + 门 / 出入口圆点），返回标记图路径"""
+    def _save_meta(self):
+        """只写 marks.json（矢量信息）；校准、层数改了之后立刻存，不用等导出"""
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.meta_file.write_text(json.dumps({"mpp": self.mpp, "dots": self.dots, "image": self.path.name, "calib": self.calib,
+                                              "floorH": self.floor_h, "floors": self.floors}, ensure_ascii=False, indent=2), "utf-8")
+
+    def save(self, correct=True):
+        """
+        写 labels.png / marks.json，渲染 map2scene 用的标记图（类别色 + 门 / 出入口圆点），再写 sidecar（逐栋层数）。
+        correct: 有倾斜校准时，把每栋楼的剪影（屋顶 + 立面）换成推算出的墙脚。labels 本身不动 —— 界面上看到的
+                 始终是和卫星图对得上的剪影，校正只发生在导出的标记图里。
+        Returns: (标记图路径, sidecar 路径)
+        """
         self.out_dir.mkdir(parents=True, exist_ok=True)
         imwrite_unicode(self.labels_file, self.labels)  # 类别图（无损）
-        self.meta_file.write_text(json.dumps({"mpp": self.mpp, "dots": self.dots, "image": self.path.name}, ensure_ascii=False, indent=2), "utf-8")
-        rgba = self.lut[self.labels]  # 类别图 → 彩色标记图（未标记透明）
+        self._save_meta()
+        lab, blds = self.corrected_labels() if correct else (self.labels, self.building_list())
+        rgba = self.lut[lab]  # 类别图 → 彩色标记图（未标记透明）
         r = max(5, int(round(1.4 / self.mpp)))  # 圆点半径 ≈ 1.4m，至少 5px（map2scene 要求点面积 ≥ 4px）
         for d in self.dots:  # 门 / 出入口画成实心圆点，不抗锯齿（颜色要纯）
             cv2.circle(rgba, (int(d["x"]), int(d["y"])), r, (*hex_bgr(DOT_COLORS[d["kind"]]), 255), -1, cv2.LINE_8)
         imwrite_unicode(self.marks_file, rgba)
-        return self.marks_file
+        # sidecar: 知道层数的楼，给 map2scene 一个落在墙脚里的点 + 层数
+        side = {"buildings": [{"at": b["at"], "floors": b["floors"]} for b in blds if b["floors"]]}
+        self.sidecar_file.write_text(json.dumps(side, ensure_ascii=False, indent=1), "utf-8")
+        return self.marks_file, self.sidecar_file
 
     # --- 编辑 ---
     def _push_undo(self, x0, y0, x1, y1):
@@ -331,6 +412,227 @@ class Session:
         self.labels[y0:y0 + old.shape[0], x0:x0 + old.shape[1]] = old
         return {"ok": True, "patch": self.patch(x0, y0, x0 + old.shape[1], y0 + old.shape[0])}
 
+    # --- 后台任务 ---
+    def start_job(self, name, fn):
+        """
+        在后台线程里跑 fn(progress)。自动找建筑要几十秒，不能卡住 HTTP 请求；界面轮询 /job 看进度。
+        同一时间只跑一个任务。fn 返回的字符串作为完成消息。
+        """
+        if self.job["running"]:
+            return {"error": f"「{self.job['name']}」还在跑，等它结束"}
+        self.job = {"name": name, "running": True, "done": 0, "total": 0, "msg": "", "error": None}
+
+        def progress(done, total, msg=""):
+            """任务里调它更新进度"""
+            self.job.update(done=done, total=total, msg=msg)
+
+        def run():
+            try:
+                self.job["msg"] = fn(progress) or ""
+            except Exception as e:  # 出错也要把 running 置回去，界面才能再点
+                import traceback
+                traceback.print_exc()
+                self.job["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                self.job["running"] = False
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"started": True}
+
+    # --- 自动建筑候选 ---
+    def run_auto_buildings(self, progress, stride=40):
+        """
+        全图自动找建筑候选（后台任务）。有 SAM 用 SAM 的「按提示点分割」，没有就用颜色连通块兜底。
+        交互点选用的 predictor 缓存着当前窗口的图像编码，这里另开一个，互不干扰。
+        """
+        seg = self.backend.make_segment_all() if isinstance(self.backend, SamBackend) else None
+        t0 = time.time()
+        found = sg.find_buildings(self.img, self.mpp, seg, stride=stride, progress=lambda a, b: progress(a, b, f"第 {a}/{b} 块"))
+        cands = [dict(id=i, crop=c["crop"], score=round(c["score"], 3), area_m2=round(c["feats"]["area_m2"]), state="pending")
+                 for i, c in enumerate(found)]
+        with self.lock:
+            self.cands = cands
+            with open(self.cands_file, "wb") as f:  # 缓存，下次打开直接用
+                pickle.dump({"shape": (self.h, self.w), "cands": cands}, f)
+        return f"找到 {len(cands)} 个候选，用时 {time.time() - t0:.0f}s"
+
+    def cand_list(self):
+        """
+        给界面画的候选轮廓: 只列 pending 的，而且已经被标成建筑的（超过一半像素）不再列出。
+        轮廓用 approxPolyDP 简化到 1 像素，几百个候选的 json 也就几十 KB。
+        """
+        bld = np.isin(self.labels, list(BUILDING_IDS))
+        out = []
+        for c in self.cands:
+            if c["state"] != "pending":
+                continue
+            x0, y0, sub = c["crop"]
+            if (bld[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] & sub).sum() > 0.5 * sub.sum():
+                continue  # 已经标过了
+            cnts, _ = cv2.findContours(sub.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                continue
+            cnt = cv2.approxPolyDP(max(cnts, key=cv2.contourArea), 1.0, True).reshape(-1, 2) + [x0, y0]  # 转回全图坐标
+            out.append({"id": c["id"], "score": c["score"], "area_m2": c["area_m2"], "poly": cnt.tolist()})
+        return out
+
+    def cand_accept(self, ids, cls, protect=True):
+        """把一批候选涂成类别 cls。并成一个掩膜一次涂完 = 一步撤销（「全部接受」按一次 Ctrl+Z 就能撤回）"""
+        want = set(ids)
+        mask = np.zeros((self.h, self.w), bool)
+        for c in self.cands:
+            if c["id"] in want and c["state"] == "pending":
+                x0, y0, sub = c["crop"]
+                mask[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] |= sub
+                c["state"] = "accepted"
+        return self.paint(mask, cls, protect)
+
+    def cand_reject(self, ids):
+        """标成 rejected，不再显示"""
+        want = set(ids)
+        for c in self.cands:
+            if c["id"] in want:
+                c["state"] = "rejected"
+
+    # --- 楼 / 层数 / 倾斜校正 ---
+    def building_list(self, labels=None):
+        """
+        当前标注里的每栋楼 = 每个建筑类别各自的连通块（面积 ≥ 20 像素）。
+        Returns: [{cls, crop: (x0, y0, 子掩膜), at: 块内离边最远的点 [x, y], floors: 层数或 None}]
+        层数: 落在这栋楼里的 floors 记录，手填的优先，都有就取最大（两栋挨着的楼连成一块时，按高的算）。
+        """
+        lab = self.labels if labels is None else labels
+        out = []
+        for cls in sorted(BUILDING_IDS):
+            m = (lab == cls).astype(np.uint8)
+            if not m.any():
+                continue
+            n, cc, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+            for i in range(1, n):
+                x, y, bw, bh, area = stats[i]
+                if area < 20:
+                    continue
+                sub = cc[y:y + bh, x:x + bw] == i
+                d = cv2.distanceTransform(np.pad(sub, 1).astype(np.uint8), cv2.DIST_L2, 3)[1:-1, 1:-1]  # 补一圈 0，贴边的也算边界
+                j = int(d.argmax())
+                out.append({"cls": cls, "crop": (int(x), int(y), sub), "at": [int(x + j % bw), int(y + j // bw)], "floors": None})
+        # 层数记录按点归属
+        for b in out:
+            x0, y0, sub = b["crop"]
+            got = {"manual": [], "auto": []}
+            for f in self.floors:
+                fx, fy = int(f["x"]) - x0, int(f["y"]) - y0
+                if 0 <= fy < sub.shape[0] and 0 <= fx < sub.shape[1] and sub[fy, fx]:
+                    got[f.get("src", "manual")].append(int(f["floors"]))
+            pick = got["manual"] or got["auto"]  # 手填的覆盖影子估的
+            b["floors"] = max(pick) if pick else None
+        return out
+
+    def cal_vectors(self):
+        """把 calib（点 + 层数）换成 satgeo 用的倾斜 / 影子向量；没校准返回 None"""
+        c = self.calib
+        if not c:
+            return None
+        return sg.calibrate(c["base"], c["roof"], c.get("tip"), c["floors"] * self.floor_h)
+
+    def run_heights(self, progress):
+        """
+        后台任务: 用影子给每栋楼估层数。需要校准里有影子尖点。估出来的记为 src='auto'，
+        之前的 auto 记录全部替换，手填的（manual）保留。看不出影子的楼不写记录，导出时按同类中位数补。
+        """
+        cal = self.cal_vectors()
+        if not cal or cal["s"] is None:
+            raise ValueError("先用「校准」工具点墙脚 → 屋顶 → 影子尖，并填层数")
+        with self.lock:
+            labels = self.labels.copy()  # 快照: 估算期间用户继续编辑也不影响
+        shadow, thr = sg.shadow_mask(self.img)
+        occ = np.isin(labels, list(BUILDING_IDS))  # 影子落在楼上的部分不算
+        blds = self.building_list(labels)
+        res = []
+        for k, b in enumerate(blds):
+            h, _ = sg.estimate_height(b["crop"], shadow, cal, occ)
+            if h:
+                res.append({"x": b["at"][0], "y": b["at"][1], "floors": max(1, int(round(h / self.floor_h))), "src": "auto"})
+            progress(k + 1, len(blds), f"{k + 1}/{len(blds)} 栋")
+        with self.lock:
+            self.floors = [f for f in self.floors if f.get("src") == "manual"] + res
+            self._save_meta()
+        return f"{len(res)}/{len(blds)} 栋估出了层数（阴影阈值 {thr:.0f}）"
+
+    def set_floors(self, x, y, floors):
+        """
+        手填某栋楼的层数: 先删掉落在同一栋楼里（或 6 像素内）的所有记录，floors > 0 再加一条 manual。
+        floors = 0 就是「清掉这栋的层数」，回到影子估算 / 默认值。
+        """
+        hit = None
+        for b in self.building_list():
+            x0, y0, sub = b["crop"]
+            if 0 <= y - y0 < sub.shape[0] and 0 <= x - x0 < sub.shape[1] and sub[int(y - y0), int(x - x0)]:
+                hit = b
+                break
+
+        def same(f):
+            """这条记录是不是属于被点的那栋楼"""
+            if hit:
+                x0, y0, sub = hit["crop"]
+                fx, fy = int(f["x"]) - x0, int(f["y"]) - y0
+                if 0 <= fy < sub.shape[0] and 0 <= fx < sub.shape[1] and sub[fy, fx]:
+                    return True
+            return math.hypot(f["x"] - x, f["y"] - y) < 6
+
+        self.floors = [f for f in self.floors if not same(f)]
+        if floors > 0:
+            self.floors.append({"x": float(x), "y": float(y), "floors": int(floors), "src": "manual"})
+        self._save_meta()
+        return self.floors
+
+    def corrected_labels(self):
+        """
+        倾斜校正: 每栋楼的剪影换成墙脚（satgeo.footprint），立面那一条让出来变成未标记（= 人行 / 地块）。
+        楼高 = 层数 × 层高；没有层数的楼用同类楼层数的中位数（一个小区的楼大多差不多高），同类都没有就不校正。
+        墙脚被腐蚀得不到剪影 30% 的（层数填错了）也不校正，宁可偏大不要丢楼。
+        Returns: (校正后的类别图, building_list，at 点已挪进墙脚)
+        """
+        blds = self.building_list()
+        cal = self.cal_vectors()
+        v = cal["v"] if cal else (0.0, 0.0)
+        if not (v[0] or v[1]):
+            return self.labels, blds  # 没校准 / 正射图: 剪影就是墙脚
+        med = {}
+        for cls in BUILDING_IDS:
+            known = [b["floors"] for b in blds if b["cls"] == cls and b["floors"]]
+            med[cls] = int(np.median(known)) if known else None
+        out = self.labels.copy()
+        for b in blds:
+            fl = b["floors"] or med[b["cls"]]
+            if not fl:
+                continue
+            x0, y0, sub = b["crop"]
+            foot = sg.footprint(sub, v, fl * self.floor_h)
+            if foot.sum() < 0.3 * sub.sum():
+                continue
+            win = out[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]]
+            win[sub & ~foot] = 0  # 立面让出来
+            d = cv2.distanceTransform(np.pad(foot, 1).astype(np.uint8), cv2.DIST_L2, 3)[1:-1, 1:-1]
+            j = int(d.argmax())
+            b["at"] = [int(x0 + j % sub.shape[1]), int(y0 + j // sub.shape[1])]  # sidecar 的点要落在墙脚里
+            b["floors"] = fl
+            b["foot"] = (x0, y0, foot)
+        return out, blds
+
+    def footprint_polys(self):
+        """界面预览用: 校正后每栋楼的墙脚轮廓 + 层数"""
+        _, blds = self.corrected_labels()
+        out = []
+        for b in blds:
+            if "foot" not in b:
+                continue
+            x0, y0, foot = b["foot"]
+            cnts, _ = cv2.findContours(foot.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if cnts:
+                out.append({"poly": (cv2.approxPolyDP(max(cnts, key=cv2.contourArea), 1.0, True).reshape(-1, 2) + [x0, y0]).tolist(), "floors": b["floors"]})
+        return out
+
 
 # ----------------------------------------------------------------------------
 # HTTP
@@ -369,7 +671,16 @@ def make_handler(S: Session, args):
                 return self._send(f.read_bytes(), "image/png") if f.exists() else self._send({"error": "no preview"}, code=404)
             if p == "/state":
                 return self._send({"name": S.stem, "width": S.w, "height": S.h, "mpp": S.mpp, "classes": CLASSES, "dots": S.dots,
-                                   "dotColors": DOT_COLORS, "backend": S.backend.name, "isSam": isinstance(S.backend, SamBackend)})
+                                   "dotColors": DOT_COLORS, "backend": S.backend.name, "isSam": isinstance(S.backend, SamBackend),
+                                   "calib": S.calib, "floorH": S.floor_h, "floors": S.floors, "buildingIds": sorted(BUILDING_IDS)})
+            if p == "/job":  # 后台任务进度（界面每秒轮询）
+                return self._send(S.job)
+            if p == "/cands":  # 待确认的建筑候选轮廓
+                with S.lock:
+                    return self._send({"cands": S.cand_list()})
+            if p == "/footprints":  # 倾斜校正后的墙脚轮廓（预览）
+                with S.lock:
+                    return self._send({"feet": S.footprint_polys()})
             self._send({"error": "not found"}, code=404)  # 其余路径
 
         def do_POST(self):
@@ -393,7 +704,10 @@ def make_handler(S: Session, args):
               /polygon    手画多边形涂色；/polyline 手画线（按 width_m 米宽）涂色，画路用
               /dot        放一个门 / 出入口点；/undo 撤销；/mpp 改比例尺
               /auto_veg   过绿指数自动提植被（只填未标记像素）；/clear_class 清掉某类
-              /export     保存并（可选）直接调 map2scene 生成 public/scenes/<name>.json
+              /export     保存并（可选）直接调 map2scene 生成 public/scenes/<name>.json；correct=倾斜校正
+              /auto_buildings  后台任务: 全图自动找建筑候选；/cand_accept /cand_reject 接受 / 丢掉候选
+              /calib      倾斜 / 影子校准；/heights 后台任务: 按影子估每栋楼层数；/floors 手填某栋层数
+              /mpp_zoom   按纬度 + 地图缩放级别设比例尺
             """
             if p == "/sam":
                 pts = [(min(max(x, 0), S.w - 1), min(max(y, 0), S.h - 1), int(l)) for x, y, l in q["points"]]  # 点夹到图内
@@ -448,17 +762,41 @@ def make_handler(S: Session, args):
                 S.labels[S.labels == cls] = 0
                 return {"ok": True, "reload": True}
             if p == "/export":
-                marks = S.save()
+                marks, side = S.save(correct=q.get("correct", True))
                 res = {"ok": True, "marks": str(marks)}
                 if q.get("scene"):  # 顺带生成场景
                     name = q.get("name") or S.stem
                     scene = project / "public" / "scenes" / f"{name}.json"
                     preview = S.out_dir / f"{S.stem}_scene_preview.png"
-                    cmd = [sys.executable, str(HERE / "map2scene.py"), str(marks), "-o", str(scene), "--mpp", str(S.mpp), "--debug", str(preview), "--site", q.get("site", "auto")]
-                    pr = subprocess.run(cmd, capture_output=True)  # 同步跑，几秒钟
-                    log = (pr.stderr or b"").decode("utf-8", "replace") if b"\xe5" in (pr.stderr or b"") else (pr.stderr or b"").decode("gbk", "replace")  # Windows 控制台可能是 GBK；有 utf-8 中文的特征字节就按 utf-8
+                    cmd = [sys.executable, str(HERE / "map2scene.py"), str(marks), "-o", str(scene), "--mpp", str(S.mpp), "--debug", str(preview),
+                           "--site", q.get("site", "auto"), "--sidecar", str(side)]
+                    pr = subprocess.run(cmd, capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})  # 同步跑，几秒钟；子进程输出统一 UTF-8
+                    log = (pr.stderr or b"").decode("utf-8", "replace")
                     res.update({"scene": str(scene), "sceneName": name, "log": log, "returncode": pr.returncode, "preview": preview.exists()})
                 return res
+            if p == "/auto_buildings":  # 后台跑，界面轮询 /job，结束后取 /cands
+                stride = int(q.get("stride", 40))
+                return S.start_job("自动找建筑", lambda prog: S.run_auto_buildings(prog, stride))
+            if p == "/cand_accept":
+                return {"ok": True, "patch": S.cand_accept(q["ids"], int(q["cls"]), q.get("protect", True))}
+            if p == "/cand_reject":
+                S.cand_reject(q["ids"])
+                return {"ok": True}
+            if p == "/calib":
+                # base / roof / tip 都是图像像素坐标；tip 可以是 null（没有明显影子，只做倾斜校正）
+                S.calib = {"base": q["base"], "roof": q["roof"], "tip": q.get("tip"), "floors": int(q["floors"])}
+                if q.get("floorH"):
+                    S.floor_h = float(q["floorH"])
+                S._save_meta()
+                return {"ok": True, "calib": S.calib, "vectors": S.cal_vectors()}
+            if p == "/heights":
+                return S.start_job("估算楼高", S.run_heights)
+            if p == "/floors":
+                return {"ok": True, "floors": S.set_floors(float(q["x"]), float(q["y"]), int(q["floors"]))}
+            if p == "/mpp_zoom":  # 网络地图截图: 纬度 + 缩放级别 → 米/像素
+                S.mpp = sg.mpp_from_zoom(float(q["lat"]), float(q["zoom"]), float(q.get("scale", 1)))
+                S._save_meta()
+                return {"ok": True, "mpp": S.mpp}
             return {"error": "unknown route"}  # 前端不该发到这里
 
     return H

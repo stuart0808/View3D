@@ -226,3 +226,12 @@ def test_estimate_height_unknown_when_shadow_hidden():
     dark, _ = sg.shadow_mask(img)
     h, score = sg.estimate_height(sil, dark, dict(v=V, s=S), sil)
     assert h is None and score <= 0
+
+
+def test_estimate_height_accepts_crop():
+    img, sil, _ = scene(height=30)
+    dark, _ = sg.shadow_mask(img)
+    full = sg.estimate_height(sil, dark, dict(v=V, s=S), sil, step=1.5)
+    part = sg.estimate_height(sg.crop(sil), dark, dict(v=V, s=S), sil, step=1.5)
+    assert full == part  # 裁剪块和全图掩膜结果一致
+    assert sg.estimate_height((0, 0, np.zeros((3, 3), bool)), dark, dict(v=V, s=S), sil) == (None, 0.0)
