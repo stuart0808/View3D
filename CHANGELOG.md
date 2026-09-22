@@ -59,6 +59,13 @@
 - `tools/osm.py`: 经纬度网格 / Web 墨卡托截图两种地理参考、GCJ-02 换算、Overpass（缓存 + 备用服务器）、
   道路等级 → 路宽、长桥快速路当高架、路网与影像自动对齐
 
+### 场景编辑器（`editor.html`）
+- 画路（每方向车道数、单行、高架，端点吸附已有道路）、楼（类型、层数）、区域、店门（贴墙）、出入口；选择、拖顶点、删除、撤销重做、本机自动保存
+- 可以在已有场景上改（路网、楼、区域拆成矢量图，带底图和经纬度），也可以从空白画布或本地底图开始
+- 生成: `tools/drawscene.py` 把矢量图画成标记图 + sidecar，交给 map2scene，路口 / 斑马线 / 红绿灯全部复用；导入服务加 `POST /api/draw/build`
+- map2scene: sidecar `roads` 按几何重合对到骨架边上，道路边和车道线带 `laneCount`，普通路也能单行
+- 前端 `laneLayout` 支持指定车道数，单行路不再限 2 条；三维页调试条加「编辑场景」入口
+
 ### 实地标注工具（手机网页 `survey.html`）
 - 50 米网格分工，每格可标未查 / 进行中 / 已完成 / 待复核
 - 点楼新增商户，点外墙标门口（自动吸附、算朝外方向，可标多扇），墙上点两下取临街范围，填店名、业态、楼层、营业时间
@@ -89,7 +96,7 @@
 - 样例数据: `tools/fetch_samples.py` 下载 SpaceNet（CC BY-SA 4.0）场景并拼接，正方形像素（经纬度网格东西向要 ×cos 纬度）
 
 ### 测试
-- pytest 96 例、vitest 164 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
+- pytest 108 例、vitest 179 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
 
 ## v0.2.0 — 2026-09-22　城区版
 
