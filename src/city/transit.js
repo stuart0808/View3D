@@ -7,6 +7,11 @@
 //   到站减速停 dwell 秒再走，到末端消失。没有信号闭塞，只靠间隔保证不追尾。
 // 画法: 地铁在地下 → 线路、站点圆环、列车都用不做深度测试的材质「透过地面」显示；
 //   铁路是实体高架桥（桥面 / 桥墩 / 钢轨），列车是实体盒子。车站模型见 stations.js。
+//
+// 数据结构:
+//   line   { id, name, kind, color, loop, pts(环线已闭合), cum(累计弧长), len, spec, stops[{name,pos,s}], next{1,-1}(两个方向下次发车的仿真秒) }
+//   train  { line, dir(1 沿点序 / -1 反向), s(车头弧长), v, stops(按行驶方向排), idx(下一站下标), dwell(剩余停站秒) }
+//   station{ name, pos, lines[], entrances[[x,y]] }  同名站合并 = 换乘站
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { CURB_H } from './ground.js'
@@ -17,6 +22,8 @@ export { RAIL_H }
 
 /**
  * 时刻表: [起始小时, 发车间隔(分钟)]，间隔 0 = 停运。想换成真实时刻表，改这里或在 new Transit 时传 timetables。
+ * 地铁工作日: 5:30 首班 8 分钟一班 → 早高峰 7~9:30 三分钟 → 平峰 6 分钟 → 晚高峰 → 22 点后 10 分钟 → 23:30 末班；
+ * 节假日没有早晚高峰，全天 5 分钟。铁路同理但间隔更长。
  */
 export const TIMETABLES = {
   metro: {
@@ -49,6 +56,7 @@ export class Transit {
    */
   constructor(scene, nav, clock, { timetables = TIMETABLES } = {}) {
     this.clock = clock
+    // 时刻表可以整套替换（测试 / 接真实数据）
     this.tables = timetables
     this.group = new THREE.Group()
     this.group.name = 'transit'
@@ -59,6 +67,7 @@ export class Transit {
     this.#buildStations(nav)
     this.#buildTrack()
     this.#buildTrainMeshes()
+    // 跳时间时按新时刻重新铺车；dispose 时取消订阅
     this.unsub = clock.on((ev) => ev === 'jump' && this.#populate())
     this.#populate()
   }
@@ -105,6 +114,10 @@ export class Transit {
   // -------------------------------------------------------------------------
   // 线路、车站的网格
   // -------------------------------------------------------------------------
+  /**
+   * 线路的网格。地铁: 一条 5m 宽的透视色带贴在 0.7m 高（透过地面看到）；
+   * 铁路: 10m 宽桥面 + 四根钢轨 + 每 30m 一根桥墩，标高 RAIL_H。之后把车站模型一起挂上。
+   */
   #buildTrack() {
     const xray = (color, opacity) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false, toneMapped: false })
     for (const line of this.lines) {
@@ -117,6 +130,7 @@ export class Transit {
         const L = Math.hypot(bx - ax, by - ay)
         if (L < 0.2) continue
         const ang = Math.atan2(-(by - ay), bx - ax)
+        // 沿这一段折线放一个盒子: w 宽、h 高、中心高 yc、横向偏移 side
         const box = (w, h, yc, side = 0) => {
           const g = new THREE.BoxGeometry(L + 0.3, h, w).toNonIndexed()
           g.translate(0, 0, side)
@@ -138,6 +152,7 @@ export class Transit {
           acc -= L
         } else strips.push(box(5, 0.05, y))
       }
+      // 合并成一个网格；透视材质的不投影，并排在后面画
       const add = (geos, mat, cast) => {
         if (!geos.length) return
         const m = new THREE.Mesh(mergeGeometries(geos), mat)
@@ -207,6 +222,7 @@ export class Transit {
   /** 推进 dt 仿真秒: 到点发车 → 每列车加减速 / 停站 / 到站回调 → 出线的车删掉 → 写实例矩阵 */
   update(dt, write = true) {
     const now = this.clock.t / 1000
+    // 发车: 每个方向到点就在端点放一列；停运时段把「下次发车」贴着 now 走，恢复运营时立刻发车
     for (const line of this.lines) {
       const hw = this.#headway(line)
       for (const dir of [1, -1]) {
@@ -232,6 +248,7 @@ export class Transit {
         this.onArrive?.(stop.name, t.line)
       }
     }
+    // 到线路末端的车消失（环线的 s 在 #write 里取模，永远不会出线）
     this.trains = this.trains.filter((t) => (t.dir === 1 ? t.s < t.line.len - 0.5 : t.s > 0.5) || t.dwell > 0)
     if (write) this.#write()
   }
@@ -249,11 +266,13 @@ export class Transit {
         else if (s < 0 || s > line.len) continue
         const i = count[line.kind]++
         if (i >= 600) break
+        // 4x4 矩阵: 车厢局部 X 沿线路切向 (dx, dy)，不缩放
         const p = sample(line.pts, line.cum, s), o = i * 16, a = mesh.instanceMatrix.array
         a[o] = p.dx; a[o + 1] = 0; a[o + 2] = p.dy; a[o + 3] = 0
         a[o + 4] = 0; a[o + 5] = 1; a[o + 6] = 0; a[o + 7] = 0
         a[o + 8] = -p.dy; a[o + 9] = 0; a[o + 10] = p.dx; a[o + 11] = 0
         a[o + 12] = p.x; a[o + 13] = y; a[o + 14] = p.y; a[o + 15] = 1
+        // 铁路列车白色、首尾车厢更亮；地铁按线路色
         mesh.setColorAt(i, col.set(line.kind === 'rail' ? (k === 0 || k === sp.cars - 1 ? '#f4f5f7' : '#e3e6ea') : line.color))
       }
     }
@@ -272,6 +291,7 @@ export class Transit {
     return { trains: by, timetable: this.clock.timetable, headwayMin: Object.fromEntries(this.lines.map((l) => [l.id, this.#headway(l) / 60])) }
   }
 
+  /** 取消时钟订阅并释放几何体 / 材质 */
   dispose() {
     this.unsub?.()
     this.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose() })

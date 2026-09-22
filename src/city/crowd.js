@@ -10,6 +10,9 @@
 //
 // 运动: 目标方向 = 距离场的下坡方向 + 每人固定的横向偏移（铺满人行道）；加上邻居的分离力（哈希网格找邻居）；
 // 一阶低通得到速度；撞墙时沿墙滑。红灯时正要踏上斑马线的人停下。
+//
+// 对外接口: population（目标人数）、dwellScale、setAttraction、update(dt)、reseed、arrive(站名, n)、countNear、stats。
+// 「离开仿真」的人只是槽位归零（FREE），槽位复用；high 是用过的最大槽位 + 1，遍历只到 high。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { UNREACHABLE, SURFACE } from './navgrid.js'
@@ -51,24 +54,24 @@ export class Crowd {
    */
   constructor(scene, nav, rand, { capacity = 4000, peopleScale = 1.5, signals = null, demand = null } = {}) {
     this.nav = nav
+    this.rand = rand
     this.demand = demand // 需求模型（人群分组 + 场馆活动）。为 null 时退回「随机逛几家店」的老逻辑
     this.base = 600 // 高峰人数；有需求模型时，实际应有人数由它按时刻算
-    this.groupActive = GROUPS.map(() => 0)
-    this.groupTargets = GROUPS.map(() => 0)
-    this._demandTimer = 0
-    this.colorsDirty = false
+    this.groupActive = GROUPS.map(() => 0) // 各人群此刻在场人数
+    this.groupTargets = GROUPS.map(() => 0) // 各人群应有人数（需求模型算的）
+    this._demandTimer = 0 // 距下次刷新应有人数的秒数（每 30 仿真秒一次）
+    this.colorsDirty = false // 有新人生成 → 实例颜色要重传
     this.signals = signals
-    this.rand = rand
     this.capacity = capacity
     this.peopleScale = peopleScale
-    this.population = 600
-    this.dwellScale = 1
+    this.population = 600 // 目标在场人数（引擎按时段 / 人群曲线设置）
+    this.dwellScale = 1 // 店内停留时长的倍数
     this.shopRatio = 0.8 // 进店逛的人占比，其余是纯路过
     this.high = 0 // 已用到的最大槽位
-    this.active = 0
-    this.insideCount = 0
-    this.ready = false
-    this.spawnDebt = 0
+    this.active = 0 // 在场人数（街上 + 楼内）
+    this.insideCount = 0 // 楼内人数
+    this.ready = false // 距离场都算完了没
+    this.spawnDebt = 0 // 补人的「欠账」（小数累计）
 
     // ---- 每个人的状态，按槽位 i 索引 ----
     const n = capacity
@@ -88,7 +91,7 @@ export class Crowd {
     this.afterEvent = new Uint8Array(n) // 刚看完演出出来: 下一步多半是回家
     this.home = new Int16Array(n).fill(-1) // 住户: 家是哪个目的地（dests 下标）；-1 = 不是核心区的住户
     this.ex = new Float32Array(n); this.ey = new Float32Array(n) // 出门后先走到的门外落脚点
-    this.heatSamples = new Float32Array(n * 3)
+    this.heatSamples = new Float32Array(n * 3) // 每步收集的热力样本 [x, y, 权重]，heat.js 读
     this.heatCount = 0
 
     this.#buildDestinations(scene)
@@ -100,7 +103,7 @@ export class Crowd {
     this.hashRows = Math.ceil((nav.rows * nav.cell) / this.hashCell) + 1
     this.hashHead = new Int32Array(this.hashCols * this.hashRows)
     this.hashNext = new Int32Array(n)
-    this._la = [0, 0, 0]
+    this._la = [0, 0, 0] // lookAhead 的复用输出 [x, y, 剩余距离]
   }
 
   /** 把楼、出入口、歇脚点整理成目的地列表，并建每栋楼的统计记录（吸引力、面积、内点、在内人数） */
@@ -478,6 +481,7 @@ export class Crowd {
       if (s === FREE) continue
       const d = this.dests[this.dest[i]]
 
+      // 楼内: 倒计时，同时把落点交给热力图
       if (s === INSIDE) {
         this.timer[i] -= dt
         const k = this.heatCount++ * 3
@@ -485,11 +489,13 @@ export class Crowd {
         if (this.timer[i] <= 0) this.#leaveShop(i)
         continue
       }
+      // 歇脚: 只倒计时
       if (s === IDLE) {
         this.timer[i] -= dt
         if (this.timer[i] <= 0) this.#leaveShop(i)
         continue
       }
+      // 进门 / 出门动画: 0.45s 内滑向门（或门外落脚点），同时缩放 1→0 / 0→1
       if (s === ENTER || s === EXIT) {
         this.timer[i] -= dt
         const dq = d.doors ? d.doors[this.door[i]] : d
@@ -535,6 +541,7 @@ export class Crowd {
         }
       }
 
+      // 速度低通，再试着走一步
       vx[i] += (ax - vx[i]) * steer
       vy[i] += (ay - vy[i]) * steer
       const nx = x[i] + vx[i] * dt, ny = y[i] + vy[i] * dt
@@ -551,7 +558,7 @@ export class Crowd {
       else if (nav.isWalkable(nx, y[i])) { x[i] = nx; vy[i] *= 0.3 }
       else if (nav.isWalkable(x[i], ny)) { y[i] = ny; vx[i] *= 0.3 }
       else { vx[i] *= 0.2; vy[i] *= 0.2 }
-      this.phase[i] += dt * 9 * this.speed[i]
+      this.phase[i] += dt * 9 * this.speed[i] // 走路起伏的相位，速度越快摆得越快
     }
     if (write) this.#writeInstances()
   }
@@ -568,6 +575,7 @@ export class Crowd {
       // 观众待到散场，再花 0~20 分钟陆续走出来
       if (ph && ph.phase !== 'egress') { this.timer[i] = (ph.ev.end - this.demand.clock.t) / 1000 + this.rand() * 1200; this.afterEvent[i] = 1 }
     }
+    // 记账
     const b = this.buildings.get(d.building)
     b.visitors++
     this.insideCount++
@@ -664,6 +672,11 @@ export class Crowd {
     return n
   }
 
+  /**
+   * 给界面和室内视图的统计:
+   * { active, inside, walking, perBuilding{楼id: 在内人数}, groups[{id,label,active,target}]|null, residents{home,away,out}|null, events[] }
+   * residents: home 在家、away 出了核心区、out 正在核心区里活动
+   */
   stats() {
     const perBuilding = {}
     for (const [id, b] of this.buildings) perBuilding[id] = b.visitors
@@ -677,6 +690,7 @@ export class Crowd {
     return { active: this.active, inside: this.insideCount, walking: this.active - this.insideCount, perBuilding, groups, residents, events: this.demand?.upcoming() || [] }
   }
 
+  /** 释放实例网格 */
   dispose() {
     this.mesh.geometry.dispose()
     this.mesh.material.dispose()
