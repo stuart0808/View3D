@@ -5,16 +5,20 @@ survey.py —— 实地标注数据（前端 survey.html 采集）的合并与�
 
 标注数据格式（前端 src/survey/model.js 生成）:
     {
-      "version": 1, "scene": "imported/xxx",
+      "version": 2, "scene": "imported/xxx",
       "cells": {"B03": {"status": "done", "by": "张三", "t": 毫秒时间戳}},
+      "tiles": {"B03": {"rle": "0x120,3x8,...", "by", "t"}},    # 第 2 版: 1 米涂色板按 50 米分块的游程编码
       "shops": [{"id": "s...", "building": "b12", "name", "category", "floor", "hours", "note", "cell",
-                 "doors": [{"pos": [x, y], "normal": [nx, ny]}], "frontage": [[x, y], ...], "frontageLen",
+                 "color", "seed": [c, r], "area",                  # 第 2 版: 色块颜色、色块里的一格、面积㎡
+                 "doors": [{"pos": [x, y], "normal": [nx, ny], "i", "j", "dir"}],  # 第 2 版的门在格点 (i, j) 上，dir = E/S/W/N
+                 "frontage": [[x, y], ...], "frontageLen",         # 第 1 版（按楼标）才有
                  "deleted": 可选, "by", "t"}],
       "log": [{"t", "by", "action", "id"}]
     }
-坐标是场景米（和 scene.json 同一套）。
+坐标是场景米（和 scene.json 同一套）。色块、门口的几何由前端 src/survey/board.js 算好（所在楼、门的坐标和法线都写进商户记录），
+这里不用重新解析画板。
 
-merge(a, b)            几台手机的数据合并: 商户 / 格子按编号取较新的一份（删除也是一次「更新」），日志取并集
+merge(a, b)            几台手机的数据合并: 商户 / 格子 / 画板分块按编号取较新的一份（删除也是一次「更新」），日志取并集
 apply_survey(scene, s) 把实测结果写回场景: 标过门的楼换成实测的门，吸引力按业态汇总，楼上记商户清单
 """
 import copy
@@ -26,8 +30,8 @@ LOG_MAX = 20000  # 日志最多留这么多条（最新的），防止文件无�
 
 
 def empty(scene):
-    """空白标注数据"""
-    return {"version": 1, "scene": scene, "cells": {}, "shops": [], "log": []}
+    """空白标注数据（和前端 emptySurvey 一致）"""
+    return {"version": 2, "scene": scene, "cells": {}, "tiles": {}, "shops": [], "log": []}
 
 
 def _newer(a, b):
@@ -46,6 +50,8 @@ def merge(a, b):
     规则是「按记录的最后修改时间取新」: 不同人标不同的店互不影响；同一家店两个人都改了，
     后改的赢。删除带墓碑（deleted = true）也有时间戳，所以删除能同步到别的手机，
     又不会被旧数据「复活」。
+    画板按 50 米分块各自取新: 两个人分别画不同的格子（考察分工本来就按格子分）互不覆盖；
+    同一块两个人都画了，后画的整块赢（块内不逐格合并，否则两个人各画半家店会拼出怪形状）。
     Returns:
         新的 dict，不改 a / b
     """
@@ -56,6 +62,9 @@ def merge(a, b):
     cells = dict(a.get("cells", {}))
     for k, v in b.get("cells", {}).items():
         cells[k] = _newer(cells.get(k), v)
+    tiles = dict(a.get("tiles") or {})  # 画板分块（第 1 版数据没有）
+    for k, v in (b.get("tiles") or {}).items():
+        tiles[k] = _newer(tiles.get(k), v)
     # 日志按 (时间, 人, 动作, 对象) 去重后按时间排，只留最新的 LOG_MAX 条
     seen, log = set(), []
     for e in a.get("log", []) + b.get("log", []):
@@ -64,7 +73,7 @@ def merge(a, b):
             seen.add(key)
             log.append(e)
     log.sort(key=lambda e: e.get("t", 0))
-    return {"version": 1, "scene": b.get("scene") or a.get("scene"), "cells": cells,
+    return {"version": 2, "scene": b.get("scene") or a.get("scene"), "cells": cells, "tiles": tiles,
             "shops": sorted(shops.values(), key=lambda s: s.get("t", 0)), "log": log[-LOG_MAX:]}
 
 
@@ -105,7 +114,9 @@ def apply_survey(scene, survey):
         if not shops:
             continue
         b["attraction"] = round(max(0.0, sum(CAT_W.get(s.get("category"), 0.6) for s in shops)), 2)  # 不认识的业态按「其他」
-        b["shops"] = [{"id": s["id"], "name": s.get("name", ""), "category": s.get("category", ""), "floor": s.get("floor", "")} for s in shops]
+        # 楼上的商户清单（点楼时显示）；涂色板商户多一个面积（㎡）
+        b["shops"] = [dict({"id": s["id"], "name": s.get("name", ""), "category": s.get("category", ""), "floor": s.get("floor", "")},
+                           **({"area": s["area"]} if s.get("area") else {})) for s in shops]
     out["survey"] = {"shops": sum(len(v) for v in by_b.values()), "buildings": len(by_b), "applied": time.strftime("%Y-%m-%d %H:%M:%S")}
     out["surveyOf"] = scene.get("surveyOf") or survey.get("scene")  # 对已回写的场景再回写，仍指向最初那份标注
     return out

@@ -64,6 +64,17 @@ def test_merge_tie_prefers_incoming_and_handles_empty():
     assert survey.merge({}, survey.empty("x"))["scene"] == "x"  # 场景 id 取有的那边
 
 
+def test_merge_tiles_per_block_newer_wins():
+    """涂色板分块各自取新: 不同块互不覆盖，同一块后画的整块赢；第 1 版数据（没有 tiles）也能合并"""
+    a = {"tiles": {"A01": {"rle": "1x2500", "by": "甲", "t": 100}, "A02": {"rle": "2x2500", "by": "甲", "t": 300}}}
+    b = {"tiles": {"A01": {"rle": "3x2500", "by": "乙", "t": 200}, "A02": {"rle": "0x2500", "by": "乙", "t": 250}, "B01": {"rle": "4x2500", "t": 1}}}
+    m = survey.merge(a, b)  # 服务器上的 a + 手机传来的 b
+    assert {k: v["rle"] for k, v in m["tiles"].items()} == {"A01": "3x2500", "A02": "2x2500", "B01": "4x2500"}
+    assert m["version"] == 2  # 合并结果一律第 2 版
+    assert survey.merge({"shops": []}, {"shops": []})["tiles"] == {}  # 第 1 版数据: tiles 为空
+    assert survey.empty("x")["tiles"] == {}  # 空白数据和前端 emptySurvey 一样带 tiles
+
+
 # ---------------------------------------------------------------------------
 # apply_survey
 # ---------------------------------------------------------------------------
@@ -98,6 +109,17 @@ def test_apply_keeps_auto_doors_when_no_door_marked():
     # 对已经回写过的场景再回写: surveyOf 保持指向最初的那份
     again = survey.apply_survey(dict(out, surveyOf="orig"), s)  # 场景已经带 surveyOf
     assert again["surveyOf"] == "orig"  # 不被覆盖
+
+
+def test_apply_painted_shops_use_grid_doors_and_area():
+    """涂色板商户（第 2 版）: 门在格点上、带朝向，前端已写好 pos / normal；楼上的清单带面积；不在楼里的色块跳过"""
+    door = {"i": 12, "j": 10, "dir": "S", "pos": [12, 10], "normal": [0, 1]}  # b1 下边、朝南
+    s = {"scene": "d", "shops": [shop("p1", 1, color=3, seed=[11, 8], area=24, doors=[door]),
+                                  shop("p2", 2, building=None, color=5, seed=[50, 50], area=4)]}  # p2 画在楼外
+    out = survey.apply_survey(scene(), s)
+    assert [d["pos"] for d in out["doors"] if d["building"] == "b1"] == [[12, 10]]  # 自动门换成格点上的门
+    assert out["buildings"][0]["shops"] == [{"id": "p1", "name": "p1", "category": "food", "floor": "", "area": 24}]
+    assert out["survey"]["shops"] == 1  # 楼外的色块不算
 
 
 def test_category_weights_match_frontend():
