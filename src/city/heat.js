@@ -18,17 +18,17 @@ export class HeatLayer {
    */
   constructor(scene, geometry, { metersPerPixel = 1.5 } = {}) {
     const b = scene.activeRegion || scene.bounds // 热力只来自逐人仿真的区域
-    this.minX = b.minX
+    this.minX = b.minX // 画布原点（米）
     this.minY = b.minY
     this.mpp = metersPerPixel
     // 密度画布: 黑 = 0，越亮越密
     this.canvas = document.createElement('canvas')
-    this.canvas.width = Math.ceil((b.maxX - b.minX) / metersPerPixel)
+    this.canvas.width = Math.ceil((b.maxX - b.minX) / metersPerPixel) // 核心区 890m → 约 600 像素
     this.canvas.height = Math.ceil((b.maxY - b.minY) / metersPerPixel)
     this.ctx = this.canvas.getContext('2d')
-    this.ctx.fillStyle = '#000'
+    this.ctx.fillStyle = '#000' // 初始密度全 0
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
-    this.sprite = this.#makeSprite(64)
+    this.sprite = this.#makeSprite(64) // 溅射用的圆盘，64px 够用（画的时候会缩放）
 
     // canvas → 纹理。NoColorSpace: 存的是密度不是颜色，不能做 sRGB 转换；不要 mipmap，每 0.2s 更新一次太贵
     this.texture = new THREE.CanvasTexture(this.canvas)
@@ -83,7 +83,7 @@ export class HeatLayer {
     this.mesh = new THREE.Mesh(geometry, this.material)
     this.mesh.name = 'heat'
     this.mesh.renderOrder = 2 // 在不透明的屋顶之后画
-    this.elapsed = 0
+    this.elapsed = 0 // 距上次重画的现实秒数
   }
 
   /** 溅射用的圆盘: 中心白、边缘透明的径向渐变 */
@@ -91,10 +91,10 @@ export class HeatLayer {
     const cv = document.createElement('canvas')
     cv.width = cv.height = size
     const ctx = cv.getContext('2d')
-    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-    g.addColorStop(0, 'rgba(255,255,255,1)')
-    g.addColorStop(0.5, 'rgba(255,255,255,0.35)')
-    g.addColorStop(1, 'rgba(255,255,255,0)')
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2) // 从中心到边缘
+    g.addColorStop(0, 'rgba(255,255,255,1)') // 中心全亮
+    g.addColorStop(0.5, 'rgba(255,255,255,0.35)') // 半径一半处已经很淡，色斑边缘柔
+    g.addColorStop(1, 'rgba(255,255,255,0)') // 边缘透明
     ctx.fillStyle = g
     ctx.fillRect(0, 0, size, size)
     return cv
@@ -107,23 +107,24 @@ export class HeatLayer {
    */
   update(dt, samples, count, gain = 1) {
     this.elapsed += dt
-    if (this.elapsed < 0.2) return
+    if (this.elapsed < 0.2) return // 不到 0.2s 不画
     this.elapsed = 0
     const { ctx, mpp } = this
     // 先整体衰减 10%（往上叠一层 10% 的黑），再相加溅射
-    ctx.globalCompositeOperation = 'source-over'
+    ctx.globalCompositeOperation = 'source-over' // 普通覆盖模式
     ctx.globalAlpha = 1
     ctx.fillStyle = 'rgba(0,0,0,0.10)'
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
     ctx.globalCompositeOperation = 'lighter'
     const r = 13 / mpp // 溅射半径 13m: 大约一家店面的范围
     for (let i = 0; i < count; i++) {
-      ctx.globalAlpha = Math.min(1, samples[i * 3 + 2] * 0.035 * gain)
+      ctx.globalAlpha = Math.min(1, samples[i * 3 + 2] * 0.035 * gain) // 每人贡献 3.5%: 约 30 人叠在一起才饱和
       ctx.drawImage(this.sprite, (samples[i * 3] - this.minX) / mpp - r, (samples[i * 3 + 1] - this.minY) / mpp - r, r * 2, r * 2)
     }
-    this.texture.needsUpdate = true
+    this.texture.needsUpdate = true // 下一帧重传纹理
   }
 
+  /** 释放纹理和材质（屋顶几何体归 buildings 管） */
   dispose() {
     this.texture.dispose()
     this.material.dispose()

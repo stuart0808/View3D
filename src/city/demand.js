@@ -45,36 +45,36 @@ const REST_SCALE = { worker: 1, elderly: 1, youth: 1.15, visitor: 1.6 }
 // 权重只有相对意义: 一个人结束一段停留后，按当前时段的权重抽下一站的类别，再在该类里按吸引力和距离抽具体地点。
 // 'venue' 不写在表里，进场时段由 crowd.js 按「还差多少观众」动态加上。
 // 结构: MIX[人群][workday|rest|all][时段|all]，'all' 表示不分
-const PERIODS = [[0, 'night'], [6, 'morning'], [11.5, 'noon'], [13.5, 'afternoon'], [17.5, 'evening'], [22, 'night']]
+const PERIODS = [[0, 'night'], [6, 'morning'], [11.5, 'noon'], [13.5, 'afternoon'], [17.5, 'evening'], [22, 'night']] // [起始小时, 时段名]，升序
 const MIX = {
-  worker: {
+  worker: { // 上班族: 工作日上下午几乎都在办公，午休出来吃饭逛店，傍晚下班离开；休息日像普通逛街的人
     workday: {
       morning: { office: 9, shop: 0.5, leave: 0.2 }, noon: { shop: 6, plaza: 2, park: 1, office: 2 }, afternoon: { office: 9, shop: 0.5, leave: 0.3 },
       evening: { leave: 6, shop: 3, plaza: 1 }, night: { leave: 9, shop: 1 },
     },
     rest: { all: { shop: 5, park: 2, plaza: 2, leave: 2 } },
   },
-  elderly: {
+  elderly: { // 老年人: 不分工作日；早上公园，中午回家，下午公园广场，晚上广场（跳舞），深夜不出门
     all: {
       morning: { park: 6, plaza: 3, shop: 2, leave: 1 }, noon: { leave: 6, shop: 2 }, afternoon: { park: 5, plaza: 3, shop: 2, leave: 2 },
       evening: { plaza: 5, park: 1, leave: 4 }, night: { leave: 10 },
     },
   },
-  youth: {
+  youth: { // 青年: 逛店为主，晚上也在
     all: {
       morning: { shop: 2, park: 1, leave: 1 }, noon: { shop: 5, plaza: 2, leave: 1 }, afternoon: { shop: 5, plaza: 2, park: 1, leave: 1.5 },
       evening: { shop: 5, plaza: 3, park: 1, leave: 1.5 }, night: { shop: 3, leave: 4 },
     },
   },
-  visitor: { all: { all: { shop: 4, park: 3, plaza: 3, leave: 1.5 } } },
+  visitor: { all: { all: { shop: 4, park: 3, plaza: 3, leave: 1.5 } } }, // 访客: 逛店看景，不分时段
 }
 
 // 场馆排期规则: 每天每个时段办一场的概率（workday / rest 分开）、时长（小时）、上座率区间。
 // type 对应 sidecar 里 venue.type；没匹配上的用 default。是否办、办多满由日期哈希决定（见 hash01），
 // 所以同一天怎么跳回来看到的都是同一场。
 const EVENT_RULES = {
-  stadium: { slots: [{ h: 19.5, workday: 0.3, rest: 0.75, dur: 2, title: '足球赛' }, { h: 15, workday: 0, rest: 0.5, dur: 2, title: '联赛下午场' }], fill: [0.55, 0.95] },
-  opera: { slots: [{ h: 19.5, workday: 0.55, rest: 0.85, dur: 2.5, title: '晚场演出' }, { h: 14.5, workday: 0, rest: 0.6, dur: 2, title: '日场演出' }], fill: [0.6, 1] },
+  stadium: { slots: [{ h: 19.5, workday: 0.3, rest: 0.75, dur: 2, title: '足球赛' }, { h: 15, workday: 0, rest: 0.5, dur: 2, title: '联赛下午场' }], fill: [0.55, 0.95] }, // 体育场: 晚场为主，休息日才有下午场
+  opera: { slots: [{ h: 19.5, workday: 0.55, rest: 0.85, dur: 2.5, title: '晚场演出' }, { h: 14.5, workday: 0, rest: 0.6, dur: 2, title: '日场演出' }], fill: [0.6, 1] }, // 剧院: 场次更密，上座率更高
   default: { slots: [{ h: 19, workday: 0.3, rest: 0.6, dur: 2, title: '活动' }], fill: [0.4, 0.9] },
 }
 const INGRESS_MIN = 75, EGRESS_MIN = 35 // 开场前 75 分钟开始进场，散场后 35 分钟走完
@@ -98,7 +98,7 @@ const HOME_FRACTION = {
 
 /** 在 [小时, 值] 节点之间线性插值；超出最后一个节点取末值 */
 function lerpCurve(pts, h) {
-  for (let i = 1; i < pts.length; i++) {
+  for (let i = 1; i < pts.length; i++) { // 找到第一个 ≥ h 的节点，在它和前一个之间插值
     if (h <= pts[i][0]) { const [h0, v0] = pts[i - 1], [h1, v1] = pts[i]; return v0 + ((v1 - v0) * (h - h0)) / (h1 - h0 || 1) }
   }
   return pts[pts.length - 1][1]
@@ -106,9 +106,9 @@ function lerpCurve(pts, h) {
 
 /** 确定性的伪随机: 同一天、同一个场馆、同一个时段，每次算出来都一样（跳回同一天看到的还是同一场活动） */
 function hash01(str) {
-  let h = 2166136261
+  let h = 2166136261 // FNV-1a 32 位
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) }
-  return ((h >>> 0) % 100000) / 100000
+  return ((h >>> 0) % 100000) / 100000 // 取 5 位小数的 [0,1)
 }
 
 export class Demand {
@@ -121,9 +121,9 @@ export class Demand {
     this.residentScale = residentScale // 住户人数的缩放: 一栋 1 万㎡的住宅楼真实住两百多人，按比例缩小
     this.venues = venues
     this.eventScale = eventScale
-    this.events = []
+    this.events = [] // 今明两天的场次，按开始时间排序
     this.#schedule()
-    clock.on((ev) => ev === 'day' && this.#schedule())
+    clock.on((ev) => ev === 'day' && this.#schedule()) // 换日重排
   }
 
   /** 休息日（周末或节假日）: 作息和活动偏好都换成 rest 那套 */
@@ -134,15 +134,15 @@ export class Demand {
     this.events = []
     const d0 = this.clock.date
     for (let k = 0; k < 2; k++) {
-      const day = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() + k)
-      const rest = this.clock.dayTypeOf(day) !== 'workday'
-      const key = `${day.getFullYear()}-${day.getMonth() + 1}-${day.getDate()}`
+      const day = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() + k) // 今天 / 明天的零点
+      const rest = this.clock.dayTypeOf(day) !== 'workday' // 那一天是不是休息日（决定用哪个概率）
+      const key = `${day.getFullYear()}-${day.getMonth() + 1}-${day.getDate()}` // 日期字符串，哈希的种子
       for (const v of this.venues) {
         const rule = EVENT_RULES[v.type] || EVENT_RULES.default
         rule.slots.forEach((slot, si) => {
-          if (hash01(`${key}|${v.id}|${si}`) >= (rest ? slot.rest : slot.workday)) return
-          const start = day.getTime() + slot.h * 3600000
-          const fill = rule.fill[0] + (rule.fill[1] - rule.fill[0]) * hash01(`${key}|${v.id}|${si}|fill`)
+          if (hash01(`${key}|${v.id}|${si}`) >= (rest ? slot.rest : slot.workday)) return // 按概率决定这一场办不办
+          const start = day.getTime() + slot.h * 3600000 // 开场时刻（毫秒）
+          const fill = rule.fill[0] + (rule.fill[1] - rule.fill[0]) * hash01(`${key}|${v.id}|${si}|fill`) // 上座率，另一个哈希
           this.events.push({ venue: v.id, venueName: v.name, title: slot.title, start, end: start + slot.dur * 3600000, attendance: Math.round(v.capacity * fill * this.eventScale), realAttendance: Math.round(v.capacity * fill) })
         })
       }
@@ -156,7 +156,7 @@ export class Demand {
    * 开场后 10 分钟内仍算 ingress（迟到的人）。
    */
   phaseOf(venueId, t = this.clock.t) {
-    for (const ev of this.events) {
+    for (const ev of this.events) { // 按开始时间排序，第一个命中的就是当前场
       if (ev.venue !== venueId) continue
       if (t >= ev.start - INGRESS_MIN * 60000 && t < ev.start + 10 * 60000) return { ev, phase: 'ingress', progress: (t - (ev.start - INGRESS_MIN * 60000)) / ((INGRESS_MIN + 10) * 60000) }
       if (t >= ev.start && t < ev.end) return { ev, phase: 'live', progress: 1 }
@@ -171,22 +171,23 @@ export class Demand {
    */
   targets(base) {
     const key = this.rest ? 'rest' : 'workday', h = this.clock.hour
+    // 节假日（不只是周末）访客再加 25%
     return GROUPS.map((g) => Math.round(base * g.share * (this.rest ? REST_SCALE[g.id] : 1) * (this.clock.dayType === 'holiday' && g.id === 'visitor' ? 1.25 : 1) * lerpCurve(PRESENCE[g.id][key], h)))
   }
 
   /** 活动带来的额外应有人数: 进场时段逐渐增加，活动期间 = 观众数，散场后逐渐归零 */
   eventExtra() {
     let n = 0
-    for (const v of this.venues) { const p = this.phaseOf(v.id); if (p) n += p.ev.attendance * Math.min(1, p.progress) }
+    for (const v of this.venues) { const p = this.phaseOf(v.id); if (p) n += p.ev.attendance * Math.min(1, p.progress) } // 各场馆叠加；progress 在 ingress 里可能略超 1，夹住
     return Math.round(n)
   }
 
   /** 第 gi 类人群此刻的活动偏好 { 类别: 权重 }。先按 workday/rest 取表，再按时段取行；'all' 表示不分 */
   mix(gi) {
     const m = MIX[GROUPS[gi].id]
-    const day = m[this.rest ? 'rest' : 'workday'] || m.all
-    if (day.all) return day.all
-    let period = 'night'
+    const day = m[this.rest ? 'rest' : 'workday'] || m.all // 没有分工作日 / 休息日的用 all
+    if (day.all) return day.all // 不分时段
+    let period = 'night' // PERIODS 从 0 点开始，所以总能命中
     for (const [from, name] of PERIODS) if (this.clock.hour >= from) period = name
     return day[period]
   }
@@ -194,8 +195,8 @@ export class Demand {
   /** 进办公楼后待多久（秒）: 上午待到午饭点，下午待到下班点，各带一点随机 */
   officeStay(rand) {
     const h = this.clock.hour
-    const until = h < 11.3 ? 12 + (rand() - 0.5) * 0.6 : h < 17 ? 18 + (rand() - 0.3) * 1.4 : h + 0.5 + rand() * 1.5
-    return Math.max(600, (until - h) * 3600)
+    const until = h < 11.3 ? 12 + (rand() - 0.5) * 0.6 : h < 17 ? 18 + (rand() - 0.3) * 1.4 : h + 0.5 + rand() * 1.5 // 待到几点: 11:42~12:18 / 17:35~19:00 / 再待 0.5~2h
+    return Math.max(600, (until - h) * 3600) // 至少 10 分钟
   }
 
   // ---- 住户 ----
@@ -203,14 +204,17 @@ export class Demand {
   /** 一栋住宅楼里参与仿真的住户数: 建筑面积 / 45㎡ 每人，再乘缩放 */
   residentsOf(area, floors) { return Math.max(4, Math.round(((area * floors) / 45) * this.residentScale)) }
   get #dayKey() { return this.rest ? 'rest' : 'workday' }
+  /** 此刻每小时离家的比例（相对在家的人） */
   homeDepartRate() { return lerpCurve(HOME_DEPART[this.#dayKey], this.clock.hour) }
+  /** 此刻每小时回家的比例（相对在外的人） */
   homeReturnRate() { return lerpCurve(HOME_RETURN[this.#dayKey], this.clock.hour) }
+  /** 此刻应有多大比例的住户在家（铺场用） */
   homeFraction() { return lerpCurve(HOME_FRACTION[this.#dayKey], this.clock.hour) }
 
   /** 这会儿出门的住户是哪类人: 工作日早上主要是上班族，其余时间老人和年轻人多 */
   residentGroup(rand) {
-    const r = rand(), commuteHours = !this.rest && this.clock.hour < 9.5
-    return commuteHours ? (r < 0.7 ? 0 : r < 0.9 ? 1 : 2) : r < 0.25 ? 0 : r < 0.65 ? 1 : 2
+    const r = rand(), commuteHours = !this.rest && this.clock.hour < 9.5 // 工作日 9:30 前是通勤时段
+    return commuteHours ? (r < 0.7 ? 0 : r < 0.9 ? 1 : 2) : r < 0.25 ? 0 : r < 0.65 ? 1 : 2 // 通勤: 上班族 70% / 老人 20% / 青年 10%；其他时候 25 / 40 / 35
   }
 
   /** 出门后直接离开核心区（去别处上班 / 办事）的概率；否则就在核心区里活动 */
@@ -219,7 +223,7 @@ export class Demand {
   /** 给界面用: 正在进行和接下来的场次 */
   upcoming(n = 3) {
     const t = this.clock.t
-    return this.events.filter((ev) => ev.end + EGRESS_MIN * 60000 > t).slice(0, n).map((ev) => {
+    return this.events.filter((ev) => ev.end + EGRESS_MIN * 60000 > t).slice(0, n).map((ev) => { // 散场还没走完的也算
       const p = this.phaseOf(ev.venue)
       const d = new Date(ev.start), pad = (x) => String(x).padStart(2, '0')
       return { ...ev, time: `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`, phase: p && p.ev === ev ? p.phase : 'scheduled' }
@@ -229,7 +233,7 @@ export class Demand {
   /** 下一场活动进场开始的时刻（毫秒时间戳），没有则 null */
   nextIngress() {
     const t = this.clock.t
-    const ev = this.events.find((e) => e.start - INGRESS_MIN * 60000 > t)
-    return ev ? ev.start - 60 * 60000 : null
+    const ev = this.events.find((e) => e.start - INGRESS_MIN * 60000 > t) // 第一个还没开始进场的
+    return ev ? ev.start - 60 * 60000 : null // 跳到开场前 1 小时（进场已经开始 15 分钟）
   }
 }

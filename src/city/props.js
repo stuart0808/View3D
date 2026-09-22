@@ -24,13 +24,13 @@ function inArea(x, y, a) {
 // ---------------------------------------------------------------------------
 /** 一棵低模树: 树干圆柱 + 两个二十面体的树冠（错开一点，不那么像球）。顶点色区分树干和树冠，实例色再乘上去 */
 function treeGeometry() {
-  const trunk = new THREE.CylinderGeometry(0.13, 0.18, 2.0, 6).toNonIndexed()
-  trunk.translate(0, 1.0, 0)
-  const crown = new THREE.IcosahedronGeometry(1.7, 1)
-  crown.scale(1, 0.85, 1)
+  const trunk = new THREE.CylinderGeometry(0.13, 0.18, 2.0, 6).toNonIndexed() // 2m 高、上细下粗的六棱柱
+  trunk.translate(0, 1.0, 0) // 底在 0
+  const crown = new THREE.IcosahedronGeometry(1.7, 1) // 主冠半径 1.7m
+  crown.scale(1, 0.85, 1) // 压扁一点
   crown.translate(0, 3.2, 0)
-  const crown2 = new THREE.IcosahedronGeometry(1.1, 1)
-  crown2.translate(0.7, 4.2, 0.3)
+  const crown2 = new THREE.IcosahedronGeometry(1.1, 1) // 副冠小一号
+  crown2.translate(0.7, 4.2, 0.3) // 偏到一侧、更高
   const parts = [trunk, crown, crown2]
   parts.forEach((g, i) => {
     const n = g.attributes.position.count
@@ -55,20 +55,20 @@ export function streetTreeSpots(scene, nav, spacing = 9) {
   // 铺装的外环和内环（内环是被铺装包住的路面 / 地块）都可能临路
   const rings = []
   for (const p of scene.pavement || []) { rings.push(p.polygon); for (const h of p.holes || []) rings.push(h) }
-  const INSET = 1.5
+  const INSET = 1.5 // 树离路沿的距离（米）
   for (const ring of rings) {
     let carry = spacing / 2 // 沿折线累计的余量，让拐点处间距也均匀
     for (let i = 0; i < ring.length; i++) {
       const a = ring[i], b = ring[(i + 1) % ring.length]
       const L = Math.hypot(b[0] - a[0], b[1] - a[1])
       if (L < 1e-6) continue
-      const tx = (b[0] - a[0]) / L, ty = (b[1] - a[1]) / L
+      const tx = (b[0] - a[0]) / L, ty = (b[1] - a[1]) / L // 边的单位切向
       let s = carry
       for (; s < L; s += spacing) {
-        const px = a[0] + tx * s, py = a[1] + ty * s
+        const px = a[0] + tx * s, py = a[1] + ty * s // 边上的候选点
         // 不知道哪一侧是铺装，两侧都试: 找到「这侧铺装、对侧车行道」的那个方向
         for (const sign of [1, -1]) {
-          const nx = -ty * sign, ny = tx * sign
+          const nx = -ty * sign, ny = tx * sign // 这一侧的法线
           if (nav.surfaceAt(px + nx * INSET, py + ny * INSET) !== SURFACE.PAVE) continue
           if (nav.surfaceAt(px - nx * INSET, py - ny * INSET) !== SURFACE.ROAD) continue
           const x = px + nx * INSET, y = py + ny * INSET
@@ -79,13 +79,13 @@ export function streetTreeSpots(scene, nav, spacing = 9) {
             const sf = nav.surfaceAt(x + Math.cos(ang) * 2.4, y + Math.sin(ang) * 2.4)
             if (sf === SURFACE.BUILDING) ok = false
           }
-          if (ok && doors.some((d) => Math.hypot(d.pos[0] - x, d.pos[1] - y) < 4)) ok = false
-          if (ok && crosswalks.some((c) => Math.hypot(c.center[0] - x, c.center[1] - y) < c.span / 2 + 3.5)) ok = false
-          if (ok) spots.push([x, y, CURB_H])
-          break
+          if (ok && doors.some((d) => Math.hypot(d.pos[0] - x, d.pos[1] - y) < 4)) ok = false // 别挡店门
+          if (ok && crosswalks.some((c) => Math.hypot(c.center[0] - x, c.center[1] - y) < c.span / 2 + 3.5)) ok = false // 别挡斑马线两端
+          if (ok) spots.push([x, y, CURB_H]) // 立在路沿标高上
+          break // 找到临路的一侧就不试另一侧了
         }
       }
-      carry = s - L
+      carry = s - L // 余量带到下一条边
     }
   }
   return spots
@@ -101,19 +101,19 @@ export function areaTreeSpots(scene, rand) {
   for (const a of scene.areas || []) {
     if (a.kind !== 'green' && a.kind !== 'park') continue
     const area = Math.abs(signedArea(a.polygon))
-    const minDist = a.kind === 'green' ? 4.2 : 6.5
+    const minDist = a.kind === 'green' ? 4.2 : 6.5 // 最小间距（米）
     const want = Math.min(900, Math.ceil(area / (a.kind === 'green' ? 30 : 75))) // 单块最多 900 棵
     const placed = []
-    for (const p of interiorPoints(a.polygon, a.holes || [], want * 3, rand)) {
+    for (const p of interiorPoints(a.polygon, a.holes || [], want * 3, rand)) { // 候选点取 3 倍，筛掉太近的
       if (placed.length >= want) break
       const edge = Math.min(distToPolygonEdge(p[0], p[1], a.polygon), ...(a.holes || []).map((h) => distToPolygonEdge(p[0], p[1], h)))
-      if (edge < 1.3) continue
+      if (edge < 1.3) continue // 离边太近
       if (placed.some((q) => Math.hypot(q[0] - p[0], q[1] - p[1]) < minDist)) continue
       // 水池可能压在公园上，别种进去
       if ((scene.areas || []).some((w) => w.kind === 'water' && inArea(p[0], p[1], w))) continue
       placed.push(p)
     }
-    for (const p of placed) spots.push([p[0], p[1], a.kind === 'green' ? 0.34 : 0.24])
+    for (const p of placed) spots.push([p[0], p[1], a.kind === 'green' ? 0.34 : 0.24]) // 标高 = ground.js 里绿化带 / 公园薄板的厚度
   }
   return spots
 }
@@ -123,14 +123,14 @@ export function buildTrees(scene, nav, rand) {
   let spots = [...streetTreeSpots(scene, nav), ...areaTreeSpots(scene, rand)]
   const MAX_TREES = 6000 // 城区级场景的绿地很多，超了就均匀抽稀
   if (spots.length > MAX_TREES) { const keep = MAX_TREES / spots.length; spots = spots.filter(() => rand() < keep) }
-  const mesh = new THREE.InstancedMesh(treeGeometry(), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, flatShading: true }), Math.max(1, spots.length))
+  const mesh = new THREE.InstancedMesh(treeGeometry(), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, flatShading: true }), Math.max(1, spots.length)) // 平面着色，低模风格
   mesh.name = 'trees'
   mesh.count = spots.length
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), c = new THREE.Color()
   spots.forEach(([x, y, h], i) => {
     const s = 0.75 + rand() * 0.55 // 大小 0.75~1.3 倍
-    q.setFromAxisAngle(up, rand() * Math.PI * 2)
-    m.compose(new THREE.Vector3(x, h, y), q, new THREE.Vector3(s, s * (0.9 + rand() * 0.3), s))
+    q.setFromAxisAngle(up, rand() * Math.PI * 2) // 随机朝向
+    m.compose(new THREE.Vector3(x, h, y), q, new THREE.Vector3(s, s * (0.9 + rand() * 0.3), s)) // 高度再单独抖 ±15%
     mesh.setMatrixAt(i, m)
     mesh.setColorAt(i, c.set(TREE_COLORS[(rand() * TREE_COLORS.length) | 0]))
   })
@@ -153,11 +153,11 @@ export function buildTrees(scene, nav, rand) {
  */
 export function layoutParking(area, sceneAngle, entry) {
   const STALL_W = 2.6, STALL_L = 5.2, AISLE = 6.4, DRIVE = 6.5 // 车位宽 / 长、通道宽、横向车道宽（米）
-  let cx = 0, cy = 0
+  let cx = 0, cy = 0 // 顶点平均 ≈ 形心
   for (const p of area.polygon) { cx += p[0]; cy += p[1] }
   cx /= area.polygon.length
   cy /= area.polygon.length
-  let ang = sceneAngle
+  let ang = sceneAngle // 通道方向（弧度）
   if (entry) {
     // 四个候选方向里，和「形心 → 出入口」点积最大的那个
     let best = -Infinity
@@ -168,11 +168,11 @@ export function layoutParking(area, sceneAngle, entry) {
     }
   }
   const ca = Math.cos(ang), sa = Math.sin(ang)
-  const toLocal = ([x, y]) => [x * ca + y * sa, -x * sa + y * ca]
-  const toWorld = (u, v) => [u * ca - v * sa, u * sa + v * ca]
+  const toLocal = ([x, y]) => [x * ca + y * sa, -x * sa + y * ca] // 世界 → 局部 (u, v)
+  const toWorld = (u, v) => [u * ca - v * sa, u * sa + v * ca] // 局部 → 世界
   let minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity
   for (const [u, v] of area.polygon.map(toLocal)) { minU = Math.min(minU, u); maxU = Math.max(maxU, u); minV = Math.min(minV, v); maxV = Math.max(maxV, v) }
-  const inside = (u, v) => { const [x, y] = toWorld(u, v); return inArea(x, y, area) }
+  const inside = (u, v) => { const [x, y] = toWorld(u, v); return inArea(x, y, area) } // 局部坐标点是否在停车场内
   const uEnd = maxU - (entry ? DRIVE : 1.0) // 车位排到哪为止（留出横向车道）
   const uDrive = maxU - DRIVE / 2           // 横向车道的中线
   const vEntry = entry ? Math.min(maxV - 2, Math.max(minV + 2, toLocal(entry)[1])) : 0 // 出入口在横向车道上的位置
@@ -181,18 +181,18 @@ export function layoutParking(area, sceneAngle, entry) {
   const vDir = [-sa, ca] // 局部 +v 在世界里的方向（车头朝向用）
   // 一排车位: 从 v0 起、长 STALL_L；vAisle 是它靠着的通道中线；noseSign 是车头朝 +v 还是 -v
   const addRow = (v0, vAisle, noseSign) => {
-    for (let u = minU + 1.2; u + STALL_W <= uEnd - 0.3; u += STALL_W) {
+    for (let u = minU + 1.2; u + STALL_W <= uEnd - 0.3; u += STALL_W) { // 沿 u 一个挨一个排
       // 四个角都在停车场内才放
       const ok = inside(u + 0.2, v0 + 0.2) && inside(u + STALL_W - 0.2, v0 + 0.2) && inside(u + 0.2, v0 + STALL_L - 0.2) && inside(u + STALL_W - 0.2, v0 + STALL_L - 0.2)
       if (!ok) continue
-      const uc = u + STALL_W / 2
+      const uc = u + STALL_W / 2 // 车位中心的 u
       stalls.push({
-        pos: toWorld(uc, v0 + STALL_L / 2),
-        dir: [vDir[0] * noseSign, vDir[1] * noseSign],
+        pos: toWorld(uc, v0 + STALL_L / 2), // 车位中心
+        dir: [vDir[0] * noseSign, vDir[1] * noseSign], // 车头朝向
         // 出库路线: 车位中心 → 通道 → 沿通道到横向车道 → 沿横向车道到出入口
         route: entry ? [toWorld(uc, v0 + STALL_L / 2), toWorld(uc, vAisle), toWorld(uDrive, vAisle), toWorld(uDrive, vEntry)] : null,
       })
-      for (const uu of [u, u + STALL_W]) lines.push({ pos: toWorld(uu, v0 + STALL_L / 2), angle: ang + Math.PI / 2, length: STALL_L, width: 0.14 })
+      for (const uu of [u, u + STALL_W]) lines.push({ pos: toWorld(uu, v0 + STALL_L / 2), angle: ang + Math.PI / 2, length: STALL_L, width: 0.14 }) // 车位两侧的线，垂直于通道
     }
   }
   // 模块沿 v 排: 车位排 / 通道 / 车位排，模块之间留 0.5m
@@ -206,13 +206,13 @@ export function layoutParking(area, sceneAngle, entry) {
 
 /** 一辆车: 车身盒 + 略靠后的车厢盒，顶点色区分（车厢深色）。车头朝 +X，长 4.3m */
 export function carGeometry() {
-  const body = new THREE.BoxGeometry(4.3, 0.8, 1.78).toNonIndexed()
-  body.translate(0, 0.62, 0)
-  const cabin = new THREE.BoxGeometry(2.3, 0.62, 1.58).toNonIndexed()
-  cabin.translate(-0.25, 1.3, 0)
+  const body = new THREE.BoxGeometry(4.3, 0.8, 1.78).toNonIndexed() // 车身 4.3 × 1.78m，0.8m 高
+  body.translate(0, 0.62, 0) // 离地 22cm（轮胎高度省略）
+  const cabin = new THREE.BoxGeometry(2.3, 0.62, 1.58).toNonIndexed() // 车厢窄一点、短一点
+  cabin.translate(-0.25, 1.3, 0) // 略靠后
   ;[body, cabin].forEach((g, i) => {
     const n = g.attributes.position.count
-    const col = new Float32Array(n * 3).fill(i === 0 ? 1 : 0.32)
+    const col = new Float32Array(n * 3).fill(i === 0 ? 1 : 0.32) // 车身 = 实例色；车厢压到 32%（深色玻璃）
     g.setAttribute('color', new THREE.BufferAttribute(col, 3))
     g.deleteAttribute('uv')
   })

@@ -13,6 +13,7 @@ import { CURB_H } from './ground.js'
 
 /** 每种型号的尺寸和布置间距（米） */
 export const LAMP_SPEC = {
+  // height 杆高、arm 灯臂长、heads 灯头数、spacing 布置间距、pole 杆底半径、headSize 灯头盒尺寸（球灯取第一个当半径）、glow 地面光斑半径
   avenue: { height: 12, arm: 2.6, heads: 2, spacing: 36, pole: 0.22, headSize: [1.3, 0.28, 0.5], glow: 11 },
   street: { height: 9, arm: 2.0, heads: 1, spacing: 30, pole: 0.16, headSize: [1.1, 0.24, 0.42], glow: 8 },
   deck: { height: 7, arm: 1.2, heads: 1, spacing: 30, pole: 0.14, headSize: [0.9, 0.22, 0.4], glow: 6 },
@@ -22,7 +23,7 @@ export const LAMP_SPEC = {
 /** 沿折线每隔 spacing 米取一个点，返回 [{x, y, tx, ty}]（tx,ty 是该处的切向） */
 function alongPolyline(pts, spacing, phase = spacing / 2) {
   const out = []
-  let carry = phase
+  let carry = phase // 第一个点离起点 phase 米（默认半个间距，两端对称）
   for (let i = 0; i + 1 < pts.length; i++) {
     const [ax, ay] = pts[i], [bx, by] = pts[i + 1]
     const L = Math.hypot(bx - ax, by - ay)
@@ -44,7 +45,7 @@ function alongPolyline(pts, spacing, phase = spacing / 2) {
  */
 export function planLamps(scene, nav = null, rand = makeRandom(5)) {
   const out = []
-  const push = (kind, x, y, z, dir) => out.push({ kind, x, y, z, dir })
+  const push = (kind, x, y, z, dir) => out.push({ kind, x, y, z, dir }) // z 是灯座标高
 
   // ---- 道路灯: 按中心线布置 ----
   for (const lane of scene.lanes || []) {
@@ -52,7 +53,7 @@ export function planLamps(scene, nav = null, rand = makeRandom(5)) {
     if (lane.oneway) continue // 环岛的环道不单独布灯，路口的灯够照了
     if (lane.level) {
       // 高架: 桥面两侧各一排护栏灯，灯臂朝桥面中心
-      const half = w / 2 - 0.6
+      const half = w / 2 - 0.6 // 护栏内 0.6m
       for (const p of alongPolyline(lane.points, LAMP_SPEC.deck.spacing)) {
         for (const sgn of [1, -1]) push('deck', p.x - p.ty * half * sgn, p.y + p.tx * half * sgn, ELEVATED_H, yawToward(p.ty * sgn, -p.tx * sgn))
       }
@@ -66,7 +67,7 @@ export function planLamps(scene, nav = null, rand = makeRandom(5)) {
       continue
     }
     // 普通道路: 单臂灯在路沿外 0.7m 的人行道上，左右交错，灯臂伸向路面
-    const off = w / 2 + 0.7
+    const off = w / 2 + 0.7 // 离中心线的距离
     const spacing = n >= 2 ? LAMP_SPEC.street.spacing : LAMP_SPEC.street.spacing * 1.3 // 支路更稀
     alongPolyline(lane.points, spacing).forEach((p, i) => {
       const sgn = i % 2 ? 1 : -1 // 右侧 = (-ty, tx)
@@ -81,17 +82,17 @@ export function planLamps(scene, nav = null, rand = makeRandom(5)) {
   for (const a of scene.areas || []) {
     if (a.kind !== 'park' && a.kind !== 'plaza') continue
     const holes = a.holes || []
-    const placed = []
+    const placed = [] // 已放的点，控制最小间距
     // 面积 / 间距² 就是大致的盏数；候选点多取几倍再按最小间距筛
     const want = Math.ceil(Math.abs(polyArea(a.polygon)) / LAMP_SPEC.garden.spacing ** 2)
     for (const p of interiorPoints(a.polygon, holes, want * 4, rand)) {
       if (placed.length >= want) break
-      if (distToPolygonEdge(p[0], p[1], a.polygon) < 2) continue
+      if (distToPolygonEdge(p[0], p[1], a.polygon) < 2) continue // 离边 2m 内不放
       if (placed.some((q) => Math.hypot(q[0] - p[0], q[1] - p[1]) < LAMP_SPEC.garden.spacing * 0.8)) continue
       // 公园里的水面上不能立灯
       if ((scene.areas || []).some((w) => w.kind === 'water' && pointInPolygon(p[0], p[1], w.polygon))) continue
       placed.push(p)
-      push('garden', p[0], p[1], a.kind === 'park' ? 0.24 : 0.21, rand() * Math.PI * 2)
+      push('garden', p[0], p[1], a.kind === 'park' ? 0.24 : 0.21, rand() * Math.PI * 2) // 标高 = 公园 / 广场薄板厚度；球灯没有朝向，随机
     }
   }
 
@@ -104,7 +105,7 @@ export function planLamps(scene, nav = null, rand = makeRandom(5)) {
       if (nav && nav.contains(p.x, p.y) && !nav.isWalkable(p.x, p.y)) continue // 别立在马路上或别的楼里
       // 核心区外没有导航网格，只避开别的建筑
       if (!nav?.contains(p.x, p.y) && (scene.buildings || []).some((o) => o !== b && pointInPolygon(p.x, p.y, o.polygon))) continue
-      push('garden', p.x, p.y, CURB_H, 0)
+      push('garden', p.x, p.y, CURB_H, 0) // 立在路沿标高
     }
   }
   return out
@@ -131,11 +132,11 @@ function polyArea(poly) {
 export function buildLamps(lamps) {
   const group = new THREE.Group()
   group.name = 'lamps'
-  const poleMat = new THREE.MeshStandardMaterial({ color: '#5b626c', roughness: 0.7 })
-  const headMat = new THREE.MeshStandardMaterial({ color: '#d8dce2', roughness: 0.5, emissive: new THREE.Color('#ffd9a0'), emissiveIntensity: 0 })
+  const poleMat = new THREE.MeshStandardMaterial({ color: '#5b626c', roughness: 0.7 }) // 深灰灯杆
+  const headMat = new THREE.MeshStandardMaterial({ color: '#d8dce2', roughness: 0.5, emissive: new THREE.Color('#ffd9a0'), emissiveIntensity: 0 }) // 灯头: 暖白自发光，白天强度 0
   // 光斑: 叠加混合的半透明圆盘，白天 opacity = 0 看不见
   const glowMat = new THREE.MeshBasicMaterial({ color: '#ffd9a0', transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
-  const byKind = {}
+  const byKind = {} // 型号 → 灯列表，每种型号一组实例网格
   for (const l of lamps) (byKind[l.kind] ||= []).push(l)
 
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), pos = new THREE.Vector3(), scl = new THREE.Vector3(1, 1, 1)
@@ -143,26 +144,26 @@ export function buildLamps(lamps) {
   for (const [kind, list] of Object.entries(byKind)) {
     const sp = LAMP_SPEC[kind]
     // 灯杆: 圆柱，底在 0
-    const poleGeo = new THREE.CylinderGeometry(sp.pole * 0.7, sp.pole, sp.height, 6)
+    const poleGeo = new THREE.CylinderGeometry(sp.pole * 0.7, sp.pole, sp.height, 6) // 上细下粗
     poleGeo.translate(0, sp.height / 2, 0)
     const poles = new THREE.InstancedMesh(poleGeo, poleMat, list.length)
     // 灯臂 + 灯头: 局部 +X 是灯臂伸出的方向
-    const armGeo = new THREE.BoxGeometry(sp.arm || 0.01, 0.12, 0.12)
-    armGeo.translate((sp.arm || 0) / 2, sp.height - 0.15, 0)
+    const armGeo = new THREE.BoxGeometry(sp.arm || 0.01, 0.12, 0.12) // 没有灯臂的型号给个 1cm 的占位盒
+    armGeo.translate((sp.arm || 0) / 2, sp.height - 0.15, 0) // 从杆顶向 +X 伸出
     const headGeo = kind === 'garden' ? new THREE.SphereGeometry(sp.headSize[0], 10, 8) : new THREE.BoxGeometry(...sp.headSize)
-    headGeo.translate(sp.arm ? sp.arm - sp.headSize[0] / 2 + 0.2 : 0, sp.height + (kind === 'garden' ? 0.3 : -0.25), 0)
+    headGeo.translate(sp.arm ? sp.arm - sp.headSize[0] / 2 + 0.2 : 0, sp.height + (kind === 'garden' ? 0.3 : -0.25), 0) // 灯头挂在臂端稍探出；球灯顶在杆上
     const arms = new THREE.InstancedMesh(armGeo, poleMat, list.length * sp.heads)
     const headsMesh = new THREE.InstancedMesh(headGeo, headMat, list.length * sp.heads)
     // 光斑: 半径 = glow，落在灯座标高上方一点点
     const glowGeo = new THREE.CircleGeometry(sp.glow, 20)
-    glowGeo.rotateX(-Math.PI / 2)
+    glowGeo.rotateX(-Math.PI / 2) // 放平
     const glows = new THREE.InstancedMesh(glowGeo, glowMat, list.length)
 
     list.forEach((l, i) => {
-      pos.set(l.x, l.z, l.y)
+      pos.set(l.x, l.z, l.y) // 二维 y → 三维 z
       m.compose(pos, q.identity(), scl)
-      poles.setMatrixAt(i, m)
-      pos.y += 0.02
+      poles.setMatrixAt(i, m) // 灯杆不转
+      pos.y += 0.02 // 光斑抬 2cm 免得和地面打架
       m.compose(pos, q, scl)
       glows.setMatrixAt(i, m)
       pos.y -= 0.02
@@ -174,9 +175,9 @@ export function buildLamps(lamps) {
         headsMesh.setMatrixAt(i * sp.heads + k, m)
       }
     })
-    for (const mesh of [poles, arms, headsMesh, glows]) { mesh.frustumCulled = false; group.add(mesh) }
-    poles.castShadow = true
-    glows.renderOrder = 3
+    for (const mesh of [poles, arms, headsMesh, glows]) { mesh.frustumCulled = false; group.add(mesh) } // 实例散布全城，不裁剪
+    poles.castShadow = true // 只有杆投影，灯头和光斑不投
+    glows.renderOrder = 3 // 在热力层（2）之后画
     heads.push(headsMesh)
   }
 
@@ -185,10 +186,11 @@ export function buildLamps(lamps) {
     count: lamps.length,
     /** k ∈ [0,1]: 0 白天，1 深夜。0.25 以下不亮（黄昏才开灯） */
     setNight(k) {
-      const on = THREE.MathUtils.clamp((k - 0.25) / 0.5, 0, 1)
-      headMat.emissiveIntensity = on * 2.2
-      glowMat.opacity = on * 0.22
+      const on = THREE.MathUtils.clamp((k - 0.25) / 0.5, 0, 1) // 0.25~0.75 之间渐亮，之后全亮
+      headMat.emissiveIntensity = on * 2.2 // 自发光强度，>1 在 bloom 之外也够亮
+      glowMat.opacity = on * 0.22 // 光斑很淡，靠叠加混合堆出亮度
     },
+    /** 释放几何体和三种材质 */
     dispose() {
       group.traverse((o) => o.geometry?.dispose())
       poleMat.dispose(); headMat.dispose(); glowMat.dispose()
