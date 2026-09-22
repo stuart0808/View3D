@@ -38,12 +38,12 @@ describe('已有场景 → 矢量图', () => { // 场景拆成矢量图
 
   it('楼、区域、底图、经纬度原样带上；画布用底图尺寸', () => {
     const d = E.sceneToDrawing(scene) // 拆成矢量图
-    expect(d.buildings).toEqual([{ polygon: [[1, 1], [5, 1], [5, 5]], kind: 'shop', floors: 3 }]) // 楼原样
+    expect(d.buildings).toEqual([{ id: 'b1', polygon: [[1, 1], [5, 1], [5, 5]], kind: 'shop', floors: 3 }]) // 楼原样，带上编号
     expect(d.areas[0].kind).toBe('green') // 区域类型
     expect(d.background).toEqual({ url: 'x.jpg' }) // 底图文件名
     expect(d.origin.summary.mpp).toBe(0.3) // 经纬度换算要原图尺寸
     expect([d.widthM, d.heightM]).toEqual([300, 200]) // 画布 = 底图尺寸
-    expect(d.doors).toEqual([]) // 店门不带，重新生成时自动布
+    expect(d.doors).toEqual([]) // 场景里没有门
   })
 
   it('没有底图: 画布取关于原点对称、包住场景范围的大小', () => {
@@ -109,11 +109,110 @@ describe('生成前检查和统计', () => { // 生成前检查
 
   it('统计: 路的总长（公里，一位小数）和各类数量', () => {
     const d = { ...E.emptyDrawing(), roads: [{ points: [[0, 0], [300, 0], [300, 400]] }], doors: [{ pos: [0, 0] }] } // 300 + 400 米的折线、一个店门
-    expect(E.stats(d)).toEqual({ roads: 1, roadKm: 0.7, buildings: 0, areas: 0, doors: 1, portals: 0 }) // 0.7 公里
+    expect(E.stats(d)).toEqual({ roads: 1, roadKm: 0.7, buildings: 0, areas: 0, doors: 1, portals: 0, junctions: 0 }) // 0.7 公里
   })
 
   it('类型表和标记调色板一致（map2scene 靠颜色认类型）', () => {
     expect(E.BUILDING_KINDS.map((k) => k.id)).toEqual(['shop', 'block', 'residential', 'venue']) // 建筑类型顺序
     expect(E.AREA_KINDS.map((k) => k.id)).toEqual(['green', 'park', 'water', 'plaza', 'parking']) // 区域类型顺序
+  })
+})
+
+describe('打开已有场景时保留身份和设置', () => { // 编辑已有场景
+  // 两栋楼（一栋场馆、一栋做过实地标注），两扇门，一个设过的路口和一个没设过的
+  const scene = { // 最小场景
+    bounds: { minX: -100, minY: -100, maxX: 100, maxY: 100 }, // 场景范围
+    roadGraph: {
+      nodes: { x: { pos: [0, 0], degree: 4, signal: { green: [40, 10] }, noLeft: true }, y: { pos: [50, 0], degree: 3 }, z: { pos: [-50, 0], degree: 3, control: 'none' } }, // 设过的十字路口、没设过的路口、设成无灯的路口
+      edges: [], // 这组测试用不到边
+    },
+    buildings: [
+      { id: 'b7', kind: 'venue', floors: 4, attraction: 1, venue: { name: '体育馆', type: 'stadium', capacity: 5000 }, polygon: [[0, 0], [1, 0], [1, 1]] }, // 场馆，默认吸引力
+      { id: 'b9', kind: 'shop', floors: 2, attraction: 2.8, shops: [{ id: 's1', name: '面馆' }], polygon: [[5, 5], [6, 5], [6, 6]] }, // 实地标注写回过的商铺
+    ],
+    doors: [{ building: 'b9', pos: [5.5, 5], normal: [0, -1] }, { building: 'b7', pos: [0.5, 0], normal: [0, -1] }], // 两扇门
+  }
+  const d = E.sceneToDrawing(scene) // 拆成矢量图
+
+  it('楼带上编号、场馆信息、实地标注的商户和吸引力；默认吸引力 1 不带', () => {
+    expect(d.buildings[0]).toMatchObject({ id: 'b7', venue: { name: '体育馆', type: 'stadium', capacity: 5000 } })
+    expect(d.buildings[0].attraction).toBeUndefined() // 默认值不写
+    expect(d.buildings[1]).toMatchObject({ id: 'b9', attraction: 2.8, shops: [{ id: 's1', name: '面馆' }] })
+  })
+
+  it('店门全部带上（实测的门重新生成后位置不变）', () => {
+    expect(d.doors).toEqual([{ pos: [5.5, 5] }, { pos: [0.5, 0] }]) // 位置原样
+  })
+
+  it('设过的路口还原成路口设置，没设过的不生成', () => {
+    expect(d.junctions).toEqual([ // 两条设置
+      { pos: [0, 0], control: 'signal', green: [40, 10], noLeft: true }, // 十字路口
+      { pos: [-50, 0], control: 'none', green: null, noLeft: false }, // 无灯的路口
+    ])
+  })
+})
+
+describe('路段合并', () => { // 路段合并
+  it('直直穿过路口的两段接成一条，拐弯的不接', () => {
+    const roads = [ // 一个路口上的三段
+      { points: [[-100, 0], [0, 0]], lanes: 2 }, // 西段
+      { points: [[0, 0], [100, 0]], lanes: 2 }, // 东段: 和西段一条直线
+      { points: [[0, 0], [0, -100]], lanes: 2 }, // 北段: 90° 拐弯，不接
+    ]
+    const m = E.mergeRoads(roads) // 合并
+    expect(m).toHaveLength(2) // 东西接成一条，北段单独
+    expect(m.find((r) => r.points.length === 3).points).toEqual([[-100, 0], [0, 0], [100, 0]]) // 接起来的，穿过路口中心
+    expect(roads[0].points).toEqual([[-100, 0], [0, 0]]) // 不改传进来的
+  })
+
+  it('两段都从接点出发时把一段倒过来；属性不同的不接', () => {
+    const m = E.mergeRoads([{ points: [[0, 0], [-50, 0]] }, { points: [[0, 0], [50, 0]] }]) // 背对背
+    expect(m).toHaveLength(1) // 接成一条
+    expect(m[0].points).toEqual([[50, 0], [0, 0], [-50, 0]]) // 东端在前
+    expect(E.mergeRoads([{ points: [[0, 0], [-50, 0]], lanes: 1 }, { points: [[0, 0], [50, 0]], lanes: 3 }])).toHaveLength(2) // 车道数不同
+  })
+
+  it('单行路只接首尾相接的，接完点序仍是行驶方向', () => {
+    const a = { points: [[-50, 0], [0, 0]], oneway: true, lanes: 2 }, b = { points: [[0, 0], [50, 0]], oneway: true, lanes: 2 }
+    expect(E.mergeRoads([b, a])[0].points).toEqual([[-50, 0], [0, 0], [50, 0]]) // 顺序无关
+    const c = { points: [[50, 0], [0, 0]], oneway: true, lanes: 2 } // 对头开: 两段都开向接点
+    expect(E.mergeRoads([a, c])).toHaveLength(2) // 不接
+  })
+
+  it('三段连成一条直路时全部接上', () => {
+    const m = E.mergeRoads([{ points: [[0, 0], [10, 0]] }, { points: [[20, 0], [30, 0]] }, { points: [[10, 0], [20, 0]] }])
+    expect(m).toHaveLength(1) // 接成一条
+    expect(m[0].points).toEqual([[0, 0], [10, 0], [20, 0], [30, 0]]) // 顺序正确
+  })
+})
+
+describe('路口设置和提醒', () => {
+  it('新路口设置默认有灯、默认配时、不禁左；能被点选', () => {
+    const j = E.newJunction([3, 4]) // 新建
+    expect(j).toEqual({ pos: [3, 4], control: 'signal', green: null, noLeft: false })
+    const d = { ...E.emptyDrawing(), junctions: [j] } // 只有一个路口设置的图
+    expect(E.hitTest(d, [3.5, 4], 1)).toEqual({ type: 'junctions', index: 0 }) // 点得到
+    expect(E.stats(d).junctions).toBe(1) // 统计里有它
+  })
+
+  it('高架端点不在画布边上、路口设置附近没有路口，都给提醒', () => {
+    const d = {
+      ...E.emptyDrawing(200, 100), // 200 × 100 米的画布
+      roads: [
+        { points: [[-100, 0], [100, 0]], lanes: 2 }, // 地面路，贯通
+        { points: [[-100, 10], [50, 10]], lanes: 1, elevated: true }, // 高架: 东端停在画布中间
+        { points: [[0, -50], [0, 50]], lanes: 1 }, // 和地面路十字相交
+      ],
+      junctions: [E.newJunction([0, 0]), E.newJunction([80, 40])], // 一个在十字路口上，一个在空地上
+    }
+    const w = E.warnings(d) // 提醒列表
+    expect(w).toHaveLength(2) // 两条
+    expect(w[0]).toMatch(/第 2 条路是高架/) // 高架那条
+    expect(w[1]).toMatch(/第 2 个路口设置/) // 空地上的路口设置
+    expect(E.warnings({ ...d, roads: [d.roads[0], { ...d.roads[1], points: [[-100, 10], [100, 10]] }, d.roads[2]], junctions: [] })).toEqual([]) // 两端到边就没事
+  })
+
+  it('场馆类型和需求模型的排期规则一致', () => {
+    expect(E.VENUE_TYPES.map((v) => v.id)).toEqual(['stadium', 'opera', 'default']) // 顺序和 demand.js 一致
   })
 })

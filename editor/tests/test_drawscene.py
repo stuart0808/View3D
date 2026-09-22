@@ -152,3 +152,56 @@ def test_server_build_drawing(tmp_path, monkeypatch):
     sid, summary = sv.build_drawing("drawn_1", drawing())
     assert sid == "imported/drawn_1" and summary["buildings"] == 2
     assert [x["id"] for x in sv.write_index()] == ["imported/drawn_1"]  # 只有场景本身
+
+
+# ---------------------------------------------------------------------------
+# 路口设置、楼的编号和属性
+# ---------------------------------------------------------------------------
+def test_apply_junctions_matches_nearest_crossing():
+    """每条设置对到附近最近的平面路口；太远、度数不够、环岛、高架上的节点都不对"""
+    nodes = {"x": {"pos": [0, 0], "radius": 7, "degree": 4}, "y": {"pos": [30, 0], "radius": 7, "degree": 3},
+             "end": {"pos": [100, 0], "radius": 3, "degree": 1}, "rb": {"pos": [0, 100], "radius": 10, "degree": 3, "roundabout": True}}
+    hit = m2s.apply_junctions(nodes, [
+        {"pos": [3, 2], "control": "signal", "green": [40, 10], "noLeft": True},  # 靠近 x
+        {"pos": [27, 1], "control": "none"},  # 靠近 y
+        {"pos": [100, 0]},  # 断头路端点: 度 1，不对
+        {"pos": [0, 100]},  # 环岛: 不对
+        {"pos": [0, 60]},  # 附近没有路口
+    ])
+    assert hit == 2  # 只对上两个
+    assert nodes["x"]["signal"] == {"green": [40.0, 10.0]} and nodes["x"]["noLeft"] and nodes["x"]["control"] == "signal"
+    assert nodes["y"]["control"] == "none" and "signal" not in nodes["y"]  # 无灯的不写配时
+    assert "control" not in nodes["end"] and "control" not in nodes["rb"]
+
+
+@pytest.mark.parametrize("bad, msg", [
+    ({"junctions": [{"pos": [0, 0], "control": "stop"}]}, "控制方式"),
+    ({"junctions": [{"pos": [0, 0], "green": [2, 30]}]}, "绿灯时长"),
+    ({"junctions": [{"pos": [0, 0], "green": [30]}]}, "绿灯时长"),
+])
+def test_validate_rejects_bad_junctions(bad, msg):
+    """路口设置的控制方式、绿灯时长不合法都拒绝"""
+    with pytest.raises(ValueError, match=msg):
+        ds.validate(drawing(**bad))
+
+
+def test_build_keeps_ids_attrs_and_junction(tmp_path):
+    """楼编号沿用、重复编号只认第一个、没给编号的顺序编且不撞；场馆信息和实地标注属性原样保留；路口设置写到节点上"""
+    d = drawing(
+        buildings=[
+            {"polygon": [[20, 15], [60, 15], [60, 40], [20, 40]], "kind": "shop", "floors": 3, "id": "b9", "attraction": 2.8, "shops": [{"id": "s1", "name": "面馆"}]},
+            {"polygon": [[-60, 15], [-20, 15], [-20, 50], [-60, 50]], "kind": "venue", "floors": 4, "id": "b1", "venue": {"name": "体育馆", "type": "stadium", "capacity": 5000}},
+            {"polygon": [[20, -50], [60, -50], [60, -20], [20, -20]], "kind": "residential", "id": "b9"},  # 编号重复: 重新编
+            {"polygon": [[-60, -90], [-20, -90], [-20, -70], [-60, -70]], "kind": "block"},  # 没给编号
+        ],
+        junctions=[{"pos": [0, 0], "control": "signal", "green": [40, 10], "noLeft": True}],
+    )
+    ds.build(d, tmp_path / "t.json")
+    s = json.loads((tmp_path / "t.json").read_text("utf-8"))
+    by_id = {b["id"]: b for b in s["buildings"]}
+    assert set(by_id) == {"b9", "b1", "b2", "b3"}  # 重复的和没给的从 b2 起编，跳过已占用的 b1
+    assert by_id["b9"]["attraction"] == 2.8 and by_id["b9"]["shops"] == [{"id": "s1", "name": "面馆"}]
+    assert by_id["b1"]["venue"] == {"name": "体育馆", "type": "stadium", "capacity": 5000}
+    assert by_id["b2"]["attraction"] == 1.0  # 没给的吸引力按默认
+    x = [n for n in s["roadGraph"]["nodes"].values() if n["degree"] >= 3]
+    assert len(x) == 1 and x[0]["signal"] == {"green": [40.0, 10.0]} and x[0]["noLeft"] is True

@@ -4,6 +4,7 @@
 //   画楼     点出轮廓，双击 / 回车闭合；类型（商铺 / 写字楼 / 住宅 / 场馆）和层数
 //   画区域   绿化带 / 公园 / 水体 / 广场 / 停车场
 //   点       店门（自动吸附到最近的外墙）、人流出入口
+//   路口     有没有红绿灯、东西 / 南北向各自的绿灯时长、禁止左转（按位置对到生成出来的路口上）
 //   选择     点选元素改属性、拖顶点改形状、Delete 删除；撤销 / 重做
 //   生成     矢量图交给导入服务（tools/sat_server.py → editor/backend/drawscene.py → tools/map2scene.py），路口、斑马线、红绿灯、人行道自动生成
 // 打开方式: /editor/（空白）、/editor/?scene=<场景 id>（在已有场景上改）
@@ -121,6 +122,7 @@ const TOOLS = [ // 左侧工具栏；key 是快捷键，tip 是状态栏提示
   { id: 'area', t: '区域', key: 'a', tip: '绿化带 / 公园 / 水体 / 广场 / 停车场，点出轮廓后双击闭合' },
   { id: 'door', t: '店门', key: 'd', tip: '点在楼边上，自动贴到最近的外墙' },
   { id: 'portal', t: '出入口', key: 'p', tip: '人流从这里进出场景，点在人行区域（不标就自动放在路口和图边）' },
+  { id: 'junction', t: '路口', key: 'j', tip: '点在路口中心: 设置有没有红绿灯、两个方向的绿灯时长、禁止左转（不设置的路口按默认自动配灯）' },
 ] // 工具表结束
 const tool = ref('select') // 当前工具
 // 新画元素的默认属性（右侧面板里改）
@@ -177,6 +179,7 @@ function onDown(e) {
     return // 选择工具处理完
   }
   if (tool.value === 'door') return addDoor(p) // 店门: 贴墙
+  if (tool.value === 'junction') return addJunction(p) // 路口设置 // 店门: 贴墙
   if (tool.value === 'portal') { // 出入口: 点哪放哪
     snapshot() // 改之前存快照
     d.value.portals.push({ pos: p.map(r2) }) // 坐标保留到厘米
@@ -214,7 +217,7 @@ function onMove(e) {
     const s = sel.value.type === 'roads' ? E.snapToRoads(d.value, p, 12 * px.value, sel.value.index) : null
     const q = (s ? s.p : p).map(r2) // 吸附后的位置，保留到厘米
     const it = d.value[sel.value.type][sel.value.index] // 被拖的元素
-    const key = sel.value.type === 'roads' ? 'points' : sel.value.type === 'doors' || sel.value.type === 'portals' ? null : 'polygon' // 路的点叫 points，楼和区域叫 polygon，点状元素只有 pos
+    const key = sel.value.type === 'roads' ? 'points' : ['doors', 'portals', 'junctions'].includes(sel.value.type) ? null : 'polygon' // 路的点叫 points，楼和区域叫 polygon，点状元素只有 pos
     if (key) it[key][drag.k] = q // 改这个顶点
     else it.pos = q // 点状元素整个挪
     return // 拖顶点不更新光标
@@ -281,6 +284,32 @@ function addDoor(p) {
   d.value.doors.push({ pos: w.pos }) // 店门放在墙上
 }
 
+/** 路口设置: 点到已有的就选中它；否则在点击处（吸到最近的道路顶点）新建一个 */
+function addJunction(p) {
+  const hit = E.hitTest(d.value, p, 8 * px.value) // 点到已有的路口设置了吗
+  if (hit?.type === 'junctions') return (sel.value = hit)
+  const s = E.snapToRoads(d.value, p, 15 * px.value) // 路口多半在道路顶点上
+  snapshot() // 新建前存快照
+  d.value.junctions.push(E.newJunction((s ? s.p : p).map(r2)))
+  sel.value = { type: 'junctions', index: d.value.junctions.length - 1 } // 选中，右侧面板直接改
+}
+
+/** 改路口某个方向的绿灯时长（0 = 东西向，1 = 南北向）；两个都回到默认 22 秒时清掉，保持「默认配时」 */
+function setGreen(k, v) {
+  snapshot() // 改之前存快照
+  const j = selItem.value // 选中的路口设置
+  const g = j.green ? [...j.green] : [22, 22] // 没设过从默认值开始
+  g[k] = Math.min(180, Math.max(5, +v || 22)) // 5 ~ 180 秒
+  j.green = g[0] === 22 && g[1] === 22 ? null : g
+}
+
+/** 楼的场馆信息（名称 / 类型 / 容量）: 没有就先建一份默认的 */
+function setVenue(key, v) {
+  snapshot() // 改之前存快照
+  const b = selItem.value // 选中的楼
+  b.venue = { name: b.venue?.name || '', type: b.venue?.type || 'default', capacity: b.venue?.capacity || 2000, [key]: v }
+}
+
 /** 删除选中的元素 */
 function removeSel() {
   if (!sel.value) return // 没选中东西
@@ -329,6 +358,7 @@ const building = ref(false) // 生成中
 const result = ref(null) // 生成结果 {scene, summary}
 const error = ref('') // 生成失败或打不开场景时的提示
 const probs = computed(() => E.problems(d.value)) // 生成前的问题清单
+const warns = computed(() => E.warnings(d.value)) // 不挡生成的提醒（高架桥头、对不上路口的设置）
 const st = computed(() => E.stats(d.value)) // 状态栏统计
 
 /** 新建空白画布 */
@@ -453,7 +483,9 @@ function midOf(pts) {
   const a = pts[k], b = pts[Math.min(pts.length - 1, k + 1)] // 那一段的两端
   return { x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2, ang: (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI } // 中点和方向角（度）
 }
-const isSel = (type, i) => sel.value && sel.value.type === type && sel.value.index === i // 这个元素是否选中
+const isSel = (type, i) => sel.value && sel.value.type === type && sel.value.index === i
+/** 路口设置在画布上的标注: 「无灯」或「灯 东西/南北」，禁止左转再加「禁左」 */
+const junctionLabel = (j) => (j.control === 'none' ? '无灯' : j.green ? `灯 ${j.green[0]}/${j.green[1]}` : '灯') + (j.noLeft ? ' 禁左' : '') // 这个元素是否选中
 </script>
 
 <template>
@@ -524,6 +556,11 @@ const isSel = (type, i) => sel.value && sel.value.type === type && sel.value.ind
       <!-- 店门（黄）/ 出入口（青） -->
       <circle v-for="(p, i) in d.doors" :key="'d' + i" :cx="p.pos[0]" :cy="p.pos[1]" :r="(isSel('doors', i) ? 6 : 4.5) * px" class="door" :stroke-width="1.5 * px" />
       <circle v-for="(p, i) in d.portals" :key="'p' + i" :cx="p.pos[0]" :cy="p.pos[1]" :r="(isSel('portals', i) ? 7 : 5.5) * px" class="portal" :stroke-width="1.5 * px" />
+      <!-- 路口设置: 菱形标记 + 文字（无灯 / 灯 东西/南北 / 禁左） -->
+      <g v-for="(j, i) in d.junctions || []" :key="'j' + i" :transform="`translate(${j.pos[0]} ${j.pos[1]})`">
+        <rect :x="-6 * px" :y="-6 * px" :width="12 * px" :height="12 * px" transform="rotate(45)" class="junction" :class="{ none: j.control === 'none', sel: isSel('junctions', i) }" :stroke-width="1.5 * px" />
+        <text :y="-10 * px" :font-size="11 * px" class="lab">{{ junctionLabel(j) }}</text>
+      </g>
       <!-- 选中元素的顶点把手（拖动改形状） -->
       <template v-if="selItem && (selItem.points || selItem.polygon)">
         <circle v-for="(v, k) in selItem.points || selItem.polygon" :key="'h' + k" :cx="v[0]" :cy="v[1]" :r="4.5 * px" class="handle" :stroke-width="1.5 * px" />
@@ -553,11 +590,32 @@ const isSel = (type, i) => sel.value && sel.value.type === type && sel.value.ind
         <b>建筑</b>
         <label>类型 <select v-model="selItem.kind" @focus="beforeEdit"><option v-for="k in E.BUILDING_KINDS" :key="k.id" :value="k.id">{{ k.t }}</option></select></label>
         <label>层数 <input v-model.number="selItem.floors" type="number" min="1" max="100" class="num" @focus="beforeEdit" /></label>
+        <label>名称 <input v-model="selItem.name" placeholder="可不填" @focus="beforeEdit" /></label>
+        <!-- 场馆: 名称 / 类型 / 容量决定需求模型怎么排活动、来多少人 -->
+        <template v-if="selItem.kind === 'venue'">
+          <label>场馆名 <input :value="selItem.venue?.name || ''" @change="setVenue('name', $event.target.value)" /></label>
+          <label>类型 <select :value="selItem.venue?.type || 'default'" @change="setVenue('type', $event.target.value)"><option v-for="v in E.VENUE_TYPES" :key="v.id" :value="v.id">{{ v.t }}</option></select></label>
+          <label>容量 <input :value="selItem.venue?.capacity || 2000" type="number" min="100" step="100" class="num" @change="setVenue('capacity', +$event.target.value || 2000)" /> 人</label>
+        </template>
+        <!-- 实地标注写回过的楼: 商户清单和吸引力会原样保留 -->
+        <span v-if="selItem.shops?.length" class="sub">实地标注: {{ selItem.shops.length }} 家商户，吸引力 {{ selItem.attraction }}</span>
+        <span v-if="selItem.id" class="sub">编号 {{ selItem.id }}（重新生成后不变）</span>
       </template>
       <!-- 选中了区域 -->
       <template v-else-if="sel && sel.type === 'areas'">
         <b>区域</b>
         <label>类型 <select v-model="selItem.kind" @focus="beforeEdit"><option v-for="k in E.AREA_KINDS" :key="k.id" :value="k.id">{{ k.t }}</option></select></label>
+      </template>
+      <!-- 选中了路口设置 -->
+      <template v-else-if="sel && sel.type === 'junctions'">
+        <b>路口</b>
+        <label>控制 <select :value="selItem.control" @change="snapshot(); selItem.control = $event.target.value"><option value="signal">红绿灯</option><option value="none">无灯（车辆依次通过）</option></select></label>
+        <template v-if="selItem.control === 'signal'">
+          <label>东西向绿灯 <input :value="selItem.green ? selItem.green[0] : 22" type="number" min="5" max="180" class="num" @change="setGreen(0, $event.target.value)" /> 秒</label>
+          <label>南北向绿灯 <input :value="selItem.green ? selItem.green[1] : 22" type="number" min="5" max="180" class="num" @change="setGreen(1, $event.target.value)" /> 秒</label>
+          <span class="sub">黄灯 3 秒、全红 2 秒；周期 {{ (selItem.green ? selItem.green[0] + selItem.green[1] : 44) + 10 }} 秒</span>
+        </template>
+        <label><input type="checkbox" :checked="selItem.noLeft" @change="snapshot(); selItem.noLeft = $event.target.checked" /> 禁止左转</label>
       </template>
       <!-- 选中了点 -->
       <template v-else-if="sel">
@@ -577,6 +635,10 @@ const isSel = (type, i) => sel.value && sel.value.type === type && sel.value.ind
         <label>类型 <select v-model="defaults.kind" @change="defaults.floors = E.BUILDING_KINDS.find((k) => k.id === defaults.kind).floors"><option v-for="k in E.BUILDING_KINDS" :key="k.id" :value="k.id">{{ k.t }}</option></select></label>
         <label>层数 <input v-model.number="defaults.floors" type="number" min="1" max="100" class="num" /></label>
       </template>
+      <template v-else-if="tool === 'junction'">
+        <b>路口设置</b>
+        <span class="sub">点在路口中心新建一个设置，或点已有的菱形标记修改。不设置的路口按默认配灯（两个方向各 22 秒）。</span>
+      </template>
       <template v-else-if="tool === 'area'">
         <b>新画的区域</b>
         <label>类型 <select v-model="defaults.areaKind"><option v-for="k in E.AREA_KINDS" :key="k.id" :value="k.id">{{ k.t }}</option></select></label>
@@ -589,12 +651,14 @@ const isSel = (type, i) => sel.value && sel.value.type === type && sel.value.ind
       <!-- 生成结果 / 错误 -->
       <p v-if="result" class="ok">已生成 {{ result.scene }}: {{ result.summary.buildings }} 栋楼、{{ result.summary.lanes }} 段车道，{{ result.summary.seconds }} 秒</p>
       <p v-if="error" class="err">{{ error }}</p>
+      <!-- 不挡生成的提醒 -->
+      <p v-for="(w, i) in warns" :key="'w' + i" class="warn">{{ w }}</p>
     </div>
 
     <!-- 底部状态栏: 提示 + 统计 + 鼠标坐标 -->
     <div class="status">
       <span>{{ hint }}</span>
-      <span class="right">路 {{ st.roads }} 条（{{ st.roadKm }} km）· 楼 {{ st.buildings }} · 区域 {{ st.areas }} · 店门 {{ st.doors }} · 出入口 {{ st.portals }}<template v-if="cursor"> · ({{ cursor[0].toFixed(1) }}, {{ cursor[1].toFixed(1) }}) m</template> · 网格 {{ gridStep }} m</span>
+      <span class="right">路 {{ st.roads }} 条（{{ st.roadKm }} km）· 楼 {{ st.buildings }} · 区域 {{ st.areas }} · 店门 {{ st.doors }} · 出入口 {{ st.portals }} · 路口设置 {{ st.junctions }}<template v-if="cursor"> · ({{ cursor[0].toFixed(1) }}, {{ cursor[1].toFixed(1) }}) m</template> · 网格 {{ gridStep }} m</span>
     </div>
   </div>
 </template>
@@ -644,6 +708,10 @@ input, select { font: inherit; padding: 2px 5px; border: 1px solid #cbd5e1; bord
 .door { fill: #fde047; stroke: #854d0e; }
 .portal { fill: #22d3ee; stroke: #155e75; }
 .handle { fill: #fff; stroke: #2563eb; }
+.junction { fill: #f97316; stroke: #7c2d12; } /* 路口设置: 橙色菱形 */
+.junction.none { fill: #94a3b8; } /* 无灯: 灰色 */
+.junction.sel { stroke: #2563eb; }
+.warn { color: #b45309; background: #fef3c7; padding: 4px 6px; border-radius: 5px; margin: 0; }
 .drawing { fill: none; stroke: rgba(37, 99, 235, 0.5); stroke-linecap: round; stroke-linejoin: round; }
 .snap { fill: none; stroke: #16a34a; }
 </style>

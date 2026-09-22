@@ -6,7 +6,9 @@ drawscene.py —— 场景编辑器（editor/，地址 /editor/）画的矢量�
 不另写一套「矢量 → 路网」的逻辑，而是把矢量图画成和手工标记完全一样的标记图，交给现成的 map2scene:
 路网骨架、路口归正、斑马线、红绿灯、人行区域、店门、停车位……全部复用，行为和其他来源的场景一致。
 标记图表达不了的信息走 sidecar:
-    footprints   每栋楼的轮廓 + 类型 + 层数（挨着画的楼不会被涂色合并成一栋，层数也不会被随机化）
+    footprints   每栋楼的轮廓 + 类型 + 层数 + 编号和属性（挨着画的楼不会被涂色合并成一栋，层数也不会被随机化；
+                 编号沿用原场景的，实地标注按编号挂的数据重新生成后还对得上）
+    junctions    路口设置: 有没有红绿灯、两个方向的绿灯时长、禁止左转（map2scene 按位置对到路口节点上）
     roads        每条路的中心线 + 路宽 + 每方向车道数 + 是否单行（map2scene 按几何重合对到骨架边上）
 
 矢量图格式（坐标都是场景米: 原点在画布中心，x 向东、y 向南，和 scene.json 一致）:
@@ -14,10 +16,13 @@ drawscene.py —— 场景编辑器（editor/，地址 /editor/）画的矢量�
       "version": 1, "widthM": 400, "heightM": 300,
       "roads":     [{"points": [[x, y], ...], "lanes": 每方向车道数, "oneway": 布尔（按点序行驶）,
                      "width": 路宽米（可省，按车道数算）, "elevated": 布尔}],
-      "buildings": [{"polygon": [[x, y], ...], "kind": shop|block|residential|venue, "floors": 层数}],
+      "buildings": [{"polygon": [[x, y], ...], "kind": shop|block|residential|venue, "floors": 层数,
+                     "id": 可选，沿用原场景的楼编号, "venue": 可选 {name, type, capacity},
+                     "attraction" / "shops" / "name": 可选，原样写进场景（实地标注写回的数据）}],
       "areas":     [{"polygon": [[x, y], ...], "kind": green|park|water|plaza|parking}],
       "doors":     [{"pos": [x, y]}],
       "portals":   [{"pos": [x, y]}],
+      "junctions": [{"pos": [x, y], "control": "signal" | "none", "green": [东西向秒, 南北向秒] 可选, "noLeft": 布尔}],
       "background": 可选 {"url": 同目录的底图文件名} 或 {"dataUrl": "data:image/...;base64,..."},
       "origin":    可选，从带经纬度的场景改出来时原样带上（{geo, summary: {width, height, mpp}}），实地标注的定位还能用
     }
@@ -87,8 +92,14 @@ def validate(d):
         _pts(a.get("polygon"), 3, "区域")
         if a.get("kind") not in AREA_KINDS:
             raise ValueError(f"不认识的区域类型 {a.get('kind')}")
-    for p in d.get("doors", []) + d.get("portals", []):
+    for p in d.get("doors", []) + d.get("portals", []) + d.get("junctions", []):
         _pts([p.get("pos")], 1, "点")
+    for j in d.get("junctions", []):
+        if j.get("control", "signal") not in ("signal", "none"):
+            raise ValueError("路口控制方式只能是 signal / none")
+        g = j.get("green")
+        if g is not None and not (isinstance(g, (list, tuple)) and len(g) == 2 and all(isinstance(v, (int, float)) and 5 <= v <= 180 for v in g)):
+            raise ValueError("绿灯时长要在 5 ~ 180 秒之间")
 
 
 def canvas(d):
@@ -138,9 +149,12 @@ def rasterize(d):
             c = np.round(px(p["pos"])).astype(int)
             cv2.circle(img, (int(c[0]), int(c[1])), max(2, int(round(rad_m / mpp))), pal[key], -1)
     side = {
-        "footprints": [{"poly": np.round(px(b["polygon"]), 2).tolist(), "kind": b["kind"], "floors": int(b.get("floors") or 0) or None}
+        # 每栋楼: 轮廓（像素）、类型、层数（没给就交给 map2scene 按类型定）、编号和要原样保留的属性
+        "footprints": [{"poly": np.round(px(b["polygon"]), 2).tolist(), "kind": b["kind"], "floors": int(b.get("floors") or 0) or None,
+                        "id": b.get("id"), "attrs": {k: b[k] for k in ("venue", "attraction", "shops", "name") if b.get(k) not in (None, "", [])}}
                        for b in d.get("buildings", [])],
         "roads": side_roads,
+        "junctions": [{**j, "pos": np.round(px(j["pos"]), 2).tolist()} for j in d.get("junctions", [])],
     }
     return img, side, mpp
 
