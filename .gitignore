@@ -13,3 +13,4 @@ tools/samples/
 public/scenes/imported/
 # 训练出的屋顶分割网络权重
 tools/roofnet.pt
+data/survey/
