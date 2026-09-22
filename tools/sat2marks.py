@@ -13,6 +13,13 @@ sat2marks.py —— 卫星图半自动标注工具（本地网页）。产出与
 
 依赖: opencv-python-headless numpy  （可选: torch ultralytics）
 权重首次使用时由 ultralytics 自动下载到当前目录；国内网络慢的话手动下载后用 --model 指向文件。
+
+结构:
+    分割后端   FloodBackend / SamBackend，统一接口 segment(points) → bool 掩膜；points = [(x, y, 1 正样本 / 0 负样本)]
+    Session    标注状态: labels（每像素一个类别 id）、dots（门 / 出入口点）、撤销栈；可保存 / 续标；导出标记图
+    HTTP       一个极简的本地服务: GET 静态页 / 图片 / 状态，POST 各种编辑动作（见 make_handler.route）
+    界面       tools/sat2marks_ui.html（纯前端，画布叠加标记层，逐块 patch 更新）
+产物: <图名>_labels.png（类别 id 图，续标用）、<图名>_marks.json（点 + 比例尺）、<图名>_marks.png（给 map2scene 的标记图）
 """
 import argparse
 import base64
@@ -50,11 +57,13 @@ BUILDING_IDS = {1, 2, 3, 11, 12}
 
 
 def hex_bgr(h):
+    """'#RRGGBB' → OpenCV 的 (b, g, r)"""
     h = h.lstrip("#")
     return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
 
 
 def imread_unicode(path):
+    """读图（支持中文路径），失败直接退出"""
     img = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise SystemExit(f"无法读取图片: {path}")
@@ -62,6 +71,7 @@ def imread_unicode(path):
 
 
 def imwrite_unicode(path, img):
+    """写图（支持中文路径），按扩展名编码"""
     ok, buf = cv2.imencode(Path(path).suffix, img)
     if not ok:
         raise RuntimeError(f"编码失败: {path}")
@@ -79,6 +89,7 @@ class FloodBackend:
         self.lab = cv2.cvtColor(cv2.bilateralFilter(img, 9, 40, 9), cv2.COLOR_BGR2Lab)
 
     def segment(self, points, tol=10):
+        """每个正样本点漫水填充后并进结果，负样本点填充的区域从结果里减掉；tol 是 Lab 三通道的容差"""
         h, w = self.lab.shape[:2]
         out = np.zeros((h, w), bool)
         for x, y, lab in points:
@@ -109,6 +120,7 @@ class SamBackend:
         self.name = f"{Path(model).stem} @ {device}"
 
     def _window_for(self, points):
+        """决定推理窗口: 图不大就整张；点都落在当前窗口内部（留 12% 边）就复用；否则以第一个点为中心开新窗"""
         h, w = self.img.shape[:2]
         t = self.tile
         if max(h, w) <= t * 1.4:
@@ -124,6 +136,7 @@ class SamBackend:
         return (x0, y0, min(w, x0 + t), min(h, y0 + t))
 
     def segment(self, points, tol=None):
+        """窗口变了才重新编码图像；多个候选掩膜取置信度最高的；结果放回整图坐标"""
         win = self._window_for(points)
         if win != self.win:
             x0, y0, x1, y1 = win
@@ -149,6 +162,7 @@ class SamBackend:
 
 
 def make_backend(img, args):
+    """按环境选后端: --no-sam / 没装 torch → 漫水填充；有 CUDA → sam2.1_l，只有 CPU → mobile_sam；SAM 初始化失败也退回漫水填充"""
     if args.no_sam:
         return FloodBackend(img)
     try:
@@ -218,6 +232,8 @@ def auto_vegetation(img, mpp, thr=0.06, min_area_m2=25.0, park_area_m2=1500.0, p
 # 会话状态
 # ----------------------------------------------------------------------------
 class Session:
+    """一张图的标注状态。labels 是 uint8 类别图（0 = 未标记），所有编辑都经过 paint() 以便撤销"""
+
     def __init__(self, image_path, args):
         self.path = Path(image_path)
         self.img = imread_unicode(self.path)
@@ -225,15 +241,15 @@ class Session:
         self.mpp = args.mpp or ((args.width_m / self.w) if args.width_m else 0.3)
         self.out_dir = Path(args.out_dir) if args.out_dir else self.path.parent
         self.stem = self.path.stem
-        self.labels = np.zeros((self.h, self.w), np.uint8)
-        self.dots = []
-        self.undo = []
-        self.preview = None
+        self.labels = np.zeros((self.h, self.w), np.uint8) # 每像素类别 id
+        self.dots = [] # [{kind: door|portal, x, y}]
+        self.undo = [] # 撤销栈: ('patch', x0, y0, 旧像素块) 或 ('dot',)
+        self.preview = None # 分割出来但还没提交的掩膜
         self.preview_points = []
         self.lock = threading.Lock()
         self.backend = make_backend(self.img, args)
         self._load()
-        self.lut = np.zeros((256, 4), np.uint8)
+        self.lut = np.zeros((256, 4), np.uint8) # 类别 id → BGRA，未标记透明
         for c in CLASSES:
             self.lut[c["id"]] = (*hex_bgr(c["color"]), 255)
 
@@ -251,6 +267,7 @@ class Session:
         return self.out_dir / f"{self.stem}_marks.png"
 
     def _load(self):
+        """同目录下有上次的 labels.png + marks.json 且尺寸一致就载入，断点续标"""
         if self.labels_file.exists() and self.meta_file.exists():
             lab = cv2.imdecode(np.fromfile(str(self.labels_file), np.uint8), cv2.IMREAD_GRAYSCALE)
             if lab is not None and lab.shape == self.labels.shape:
@@ -261,6 +278,7 @@ class Session:
                 print(f"[sat2marks] 已载入上次的标注 {self.labels_file.name}")
 
     def save(self):
+        """写 labels.png / marks.json，并渲染 map2scene 用的标记图（类别色 + 门 / 出入口圆点），返回标记图路径"""
         self.out_dir.mkdir(parents=True, exist_ok=True)
         imwrite_unicode(self.labels_file, self.labels)
         self.meta_file.write_text(json.dumps({"mpp": self.mpp, "dots": self.dots, "image": self.path.name}, ensure_ascii=False, indent=2), "utf-8")
@@ -273,10 +291,12 @@ class Session:
 
     # --- 编辑 ---
     def _push_undo(self, x0, y0, x1, y1):
+        """把即将被改的矩形块存进撤销栈（最多 60 步）"""
         self.undo.append(("patch", x0, y0, self.labels[y0:y1, x0:x1].copy()))
         del self.undo[:-60]
 
     def paint(self, mask, cls, protect_buildings=False):
+        """把掩膜范围涂成类别 cls（0 = 擦除）。protect_buildings: 涂道路 / 绿地时不覆盖已标的建筑。返回被改区域的 patch"""
         ys, xs = np.nonzero(mask)
         if not len(xs):
             return None
@@ -289,13 +309,16 @@ class Session:
         return self.patch(x0, y0, x1, y1)
 
     def patch(self, x0, y0, x1, y1):
+        """一块矩形区域的标记层渲染成 PNG（base64），前端只重绘这一块"""
         ok, buf = cv2.imencode(".png", self.lut[self.labels[y0:y1, x0:x1]])
         return {"bbox": [x0, y0, x1 - x0, y1 - y0], "png": base64.b64encode(buf).decode()}
 
     def full_png(self):
+        """整张标记层 PNG（页面初始化 / 整体重载时用）"""
         return cv2.imencode(".png", self.lut[self.labels])[1].tobytes()
 
     def do_undo(self):
+        """撤销一步: 点 → 弹出最后一个点；像素块 → 写回旧值并返回 patch"""
         if not self.undo:
             return {"ok": False}
         item = self.undo.pop()
@@ -311,6 +334,7 @@ class Session:
 # HTTP
 # ----------------------------------------------------------------------------
 def make_handler(S: Session, args):
+    """生成绑定了会话的请求处理类。所有 POST 在会话锁内执行（分割和涂色都会改状态）"""
     project = HERE.parent
 
     class H(BaseHTTPRequestHandler):
@@ -357,6 +381,15 @@ def make_handler(S: Session, args):
                 self._send({"error": f"{type(e).__name__}: {e}"}, code=500)
 
         def route(self, p, q):
+            """
+            POST 路由（q 是请求 json）:
+              /sam        用点提示分割 → 预览掩膜（不落到 labels）
+              /commit     把预览掩膜涂成某类
+              /polygon    手画多边形涂色；/polyline 手画线（按 width_m 米宽）涂色，画路用
+              /dot        放一个门 / 出入口点；/undo 撤销；/mpp 改比例尺
+              /auto_veg   过绿指数自动提植被（只填未标记像素）；/clear_class 清掉某类
+              /export     保存并（可选）直接调 map2scene 生成 public/scenes/<name>.json
+            """
             if p == "/sam":
                 pts = [(min(max(x, 0), S.w - 1), min(max(y, 0), S.h - 1), int(l)) for x, y, l in q["points"]]
                 if not any(l for *_, l in pts):
@@ -427,6 +460,7 @@ def make_handler(S: Session, args):
 
 
 def main():
+    """命令行入口: 建会话、起本地 HTTP 服务、打开浏览器"""
     ap = argparse.ArgumentParser(description="卫星图半自动标注 → 标记图层（供 map2scene.py 使用）", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("image")
     g = ap.add_mutually_exclusive_group()

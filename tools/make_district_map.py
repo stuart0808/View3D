@@ -26,6 +26,7 @@ from make_demo_map import (BLUE, ELEVATED, GREEN, MAGENTA, ORANGE, PARK, PARKING
 RESIDENTIAL = (128, 255, 0)  # BGR of #00FF80
 VENUE = (0, 255, 128)        # BGR of #80FF00
 
+# 画布尺寸（像素）和比例尺；下面所有坐标都是像素
 W, H, MPP = 4800, 3400, 0.5
 CORE_S, CORE_X, CORE_Y = 0.4, 1800, 1260           # 街区示例的缩放和左上角
 CORE_W, CORE_H = int(3000 * CORE_S), int(2200 * CORE_S)
@@ -34,6 +35,7 @@ ACTIVE = [1510, 810, 3290, 2150]                    # 逐人仿真的核心区�
 
 
 def rounded_rect_path(x0, y0, x1, y1, r, n=10):
+    """圆角矩形的闭合折线（顺时针，从右上角圆弧开始），每个圆角 n 段；环形高架 / 环线地铁共用"""
     pts = []
     for cx, cy, a0 in ((x1 - r, y0 + r, -90), (x1 - r, y1 - r, 0), (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)):
         for k in range(n + 1):
@@ -55,21 +57,24 @@ def smooth(points, rounds=4):
 
 
 def main():
+    """画标记图 + 写 sidecar。顺序: 道路 → 嵌入核心区 → 场馆 → 铁路走廊 → 自动填楼 → 高架（最后画，盖在路上）"""
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "tools/samples")
     rng = np.random.default_rng(11)
     img = np.full((H, W, 3), (232, 234, 236), np.uint8)
 
     def R(x, y, w, h, col):
+        """填一个矩形"""
         cv2.rectangle(img, (int(x), int(y)), (int(x + w), int(y + h)), col, -1)
 
     # ------------------------------------------------------------------ 道路
     road = np.zeros((H, W), np.uint8)
 
     def road_rect(x, y, w, h):
+        """画一段矩形道路，同时记进道路掩膜（后面退让人行道用）"""
         R(x, y, w, h, BLUE)
         cv2.rectangle(road, (int(x), int(y)), (int(x + w), int(y + h)), 255, -1)
 
-    G0, GX1, GY1 = 330, 4470, 3070
+    G0, GX1, GY1 = 330, 4470, 3070  # 格网道路的外框
     for x in (330, 1500, 3300, 4470):                       # 主干路 24m
         road_rect(x - 24, G0 - 24, 48, GY1 - G0 + 48)
     for y in (330, 3070):
@@ -111,7 +116,7 @@ def main():
     core_rect = (CORE_X + 20, CORE_Y + 20, CORE_X + CORE_W - 20, CORE_Y + CORE_H - 20)
 
     # ------------------------------------------------------------------ 场馆
-    reserved = np.zeros((H, W), np.uint8)
+    reserved = np.zeros((H, W), np.uint8)  # 场馆及其广场占的地，自动填楼时跳过
     # 体育场: 核心区正北的大地块
     R(2560, 862, 690, 392, PLAZA)
     cv2.ellipse(img, (2905, 1058), (285, 165), 0, 0, 360, VENUE, -1)
@@ -129,6 +134,7 @@ def main():
     cv2.polylines(corridor, [rail.round().astype(np.int32).reshape(-1, 1, 2)], False, 255, 70)
 
     # ------------------------------------------------------------------ 其余地块自动填充
+    # free = 还能盖楼的地: 格网内 − 道路（含退让）− 核心区 − 场馆 − 环路弯角下方 − 铁路走廊
     free = np.zeros((H, W), np.uint8)
     cv2.rectangle(free, (G0, G0), (GX1, GY1), 255, -1)
     free[cv2.dilate(road, np.ones((25, 25), np.uint8)) > 0] = 0                      # 退让人行道
@@ -146,6 +152,7 @@ def main():
     used = np.zeros((H, W), np.uint8)
 
     def try_rect(block, x, y, w, h, col):
+        """在地块 block 里放一栋矩形楼: 必须整个落在地块内、和已放的楼隔 6px 以上"""
         x, y, w, h = int(x), int(y), int(w), int(h)
         if x < 0 or y < 0 or x + w >= W or y + h >= H:
             return False
@@ -155,6 +162,7 @@ def main():
         used[y:y + h, x:x + w] = 255
         return True
 
+    # 每个地块按位置抽一种用途: 环路内以写字楼 / 商业为主，环路外以住宅为主；然后逐行逐个放楼
     inside_ring = lambda c: RING[0] < c[0] < RING[2] and RING[1] < c[1] < RING[3]
     for b in range(1, n):
         x0, y0, bw, bh, area = stats[b]
@@ -193,12 +201,12 @@ def main():
             y += row_h + (62 if kind == "residential" else rng.integers(34, 52))
 
     # ------------------------------------------------------------------ 高架（画在最后，盖在地面道路上）
-    exp_y = art_y + 43
+    exp_y = art_y + 43  # 横贯的高架快速路压在主干路正中
     cv2.rectangle(img, (60, exp_y - 20), (W - 60, exp_y + 20), ELEVATED, -1)
     cv2.polylines(img, [ring_path.round().astype(np.int32).reshape(-1, 1, 2)], True, ELEVATED, 40)
 
     # ------------------------------------------------------------------ sidecar: 轨道交通 + 场馆 + 核心区
-    P = lambda pts: [[round(float(x), 1), round(float(y), 1)] for x, y in pts]
+    P = lambda pts: [[round(float(x), 1), round(float(y), 1)] for x, y in pts]  # 像素坐标保留 1 位小数
     mx = bx + 16  # 南北线走核心区次干路 B 的正下方
     sidecar = {
         "mpp": MPP,
