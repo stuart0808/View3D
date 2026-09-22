@@ -385,7 +385,7 @@ def predict(img, mpp, path=WEIGHTS, tile=512, overlap=64, progress=None):
     return [cv2.resize(p, (w0, h0), interpolation=cv2.INTER_LINEAR) for p in prob]
 
 
-def instances(pb, pe, mpp, thr=0.5, edge_thr=0.35, min_m2=12.0):
+def instances(pb, pe, mpp, thr=0.4, edge_thr=0.4, min_m2=20.0):  # 默认值在 3 个验证场景上网格搜索得到（F1 0.40 → 0.42）
     """
     概率图 → 一栋一栋的楼（裁剪块列表，同 satgeo.crop 的格式）。
     种子 = 建筑概率高、且不在边界上的像素（每栋楼的「内核」），开运算去掉细连接后按连通块编号；

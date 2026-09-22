@@ -60,6 +60,40 @@ python tools/map2scene.py tools/samples/district_marked.png --sidecar tools/samp
 环岛、高架的桥墩和上下匝道、行道树、停车位和车、地下车库（面积 ≥1200㎡ 且临路的楼）、店门（没标时）、出入口（没标时）。
 调色板可改，见 `tools/markers.default.json`（`--markers`）。低饱和度像素（各种灰）一律视为未标记，所以灰色底图不会干扰。
 
+## 在网页里导入卫星图（全自动）
+
+```bash
+python tools/sat_server.py     # 导入服务（另开一个终端；npm run dev 已把 /api 代理过去）
+```
+
+调试条上点「导入卫星图」：选图 → 给比例尺 → 开始处理，完成后自动切到新场景，勾「卫星底图」可以把原图铺在地面上对照。
+比例尺三种给法：已知 米/像素；**网络地图截图**填中心经纬度 + 缩放级别（高德 / 腾讯选 GCJ-02 坐标系）；GeoTIFF 自带。
+给了地理位置时会从 OpenStreetMap 取道路（按等级给车道数，长桥快速路当高架）、河道、绿地、已有的建筑轮廓和层数，
+并把路网自动对齐到影像。「参考层数」可选：影子只能给出楼的相对高矮，填了它整体比例更准。
+
+流水线（`tools/autoscene.py`，也能命令行单独用）：
+
+| 步骤 | 做法 |
+|---|---|
+| 建筑 | 屋顶分割网络 `roofnet.py` > SAM > 颜色连通块，按可用性降级 |
+| 道路 | OSM；没有坐标时用网络的道路通道（第二版权重才有） |
+| 楼高 | OSM 层数 > 影子估算（自动找影子方向）> 按占地面积的默认值 |
+| 其余 | 植被按颜色；水系 / 公园 / 停车场来自 OSM；最后交给 map2scene |
+
+屋顶分割网络的权重不进仓库，第一次用要训练（CPU 约 1 小时，有 CUDA 快得多）：
+
+```bash
+python tools/fetch_samples.py               # 评测用的样例场景（带建筑真值）
+python tools/fetch_samples.py --train 350   # 训练瓦片（建筑）
+python tools/roofnet.py train --iters 4000  # → tools/roofnet.pt
+python tools/fetch_samples.py --train-roads 100
+python tools/roofnet.py train --roads --init tools/roofnet.pt --iters 2500 --lr 3e-4   # 第二版: 加道路通道
+python tools/eval_buildings.py --method roofnet   # 在评测场景上打分
+```
+
+数据来源：卫星样例和训练数据来自 [SpaceNet](https://spacenet.ai/)（Maxar / WorldView-3，CC BY-SA 4.0）；
+道路等矢量数据来自 © OpenStreetMap contributors（ODbL）。都只下载到本机 `tools/samples/`，不进仓库。
+
 ## 从卫星图出场景：sat2marks
 
 ```bash
@@ -157,6 +191,10 @@ python tools/map2scene.py 标记图.png -o public/scenes/my.json --width-m 600 -
 
 | `src/city/stations.js` | 地铁出入口亭 / 高铁站房 / 综合枢纽的模型与站前广场选边 |
 | `src/city/lamps.js` | 路灯布点（干道 / 街道 / 高架 / 庭院四种）与夜间点亮 |
+| `tools/autoscene.py` / `sat_server.py` | 全自动流水线 / 前端导入用的本地服务 |
+| `tools/roofnet.py` | 屋顶（+ 道路）分割网络：训练、分块推理、分水岭拆单栋 |
+| `tools/osm.py` | OpenStreetMap: 地理参考、GCJ-02、Overpass、路网自动对齐 |
+| `tools/fetch_samples.py` / `eval_buildings.py` | 下载 SpaceNet 样例 / 训练数据；自动建筑的评测 |
 | `tests/*.test.js` | vitest 单元测试（`npm test`）；`tests/py/` 是 map2scene 的 pytest（`npm run test:py`，需 tools/requirements.txt） |
 
 性能参考（示例城区，集显笔记本）：600 人 + 约 270 辆车（含停着的）、约 50 个 draw call、40 万三角面，60fps。
