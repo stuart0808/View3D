@@ -143,6 +143,10 @@ python tools/map2scene.py 标记图.png -o public/scenes/my.json --width-m 600 -
 | `src/city/demand.js` | 人群分组的出现曲线与活动偏好、场馆活动排期 |
 | `src/city/transit.js` | 地铁 / 铁路：线路与车站网格、两套时刻表、列车运行、到站客流 |
 
+| `src/city/stations.js` | 地铁出入口亭 / 高铁站房 / 综合枢纽的模型与站前广场选边 |
+| `src/city/lamps.js` | 路灯布点（干道 / 街道 / 高架 / 庭院四种）与夜间点亮 |
+| `tests/*.test.js` | vitest 单元测试（`npm test`）；`tests/py/` 是 map2scene 的 pytest（`npm run test:py`，需 tools/requirements.txt） |
+
 性能参考（示例城区，集显笔记本）：600 人 + 约 270 辆车（含停着的）、约 50 个 draw call、40 万三角面，60fps。
 
 ## 已知限制

@@ -25,6 +25,17 @@ map2scene.py —— 把「涂了色块标记的二维地图图片」转换成前
     python tools/map2scene.py map_marked.png -o public/scenes/my.json --width-m 300 --debug preview.png
 
 坐标系: 输出单位为米，x 向右、y 向下（与图片一致），原点在内容中心。
+
+流程（main）:
+    1. classify: 逐像素按颜色归类 → 每种标记一张掩膜
+    2. 建筑: 掩膜 → 轮廓 → 简化 → 直角化（吸附到街区主方向）→ 层数
+    3. 道路 / 高架 / 面状区域掩膜 → 地块范围（内容外包络）→ 人行铺装 = 地块 − 道路 − 下沉区域
+    4. 环岛检测（道路掩膜里的圆形孔洞）
+    5. 道路骨架 → 中心线图 → 剪毛刺、并路口、路口归正 → roadGraph（节点 / 边 / 路宽 / 路口深度）、车道线、斑马线
+    6. 高架同样走骨架，level=1
+    7. sidecar: 核心区、场馆信息、轨道交通线路
+    8. 店门（手工点或自动沿临街边布）、人流出入口（手工点、核心区边界、或地块四周）
+    9. 写 scene.json，可选画预览图
 """
 import argparse
 import json
@@ -60,6 +71,7 @@ DEFAULT_MARKERS = [
 # 基础工具
 # ----------------------------------------------------------------------------
 def log(*a):
+    """进度信息走 stderr，stdout 留给可能的管道输出"""
     print("[map2scene]", *a, file=sys.stderr)
 
 
@@ -73,12 +85,14 @@ def imread_unicode(path):
 
 
 def imwrite_unicode(path, img):
+    """同 imread_unicode: 中文路径下写图"""
     ok, buf = cv2.imencode(Path(path).suffix or ".png", img)
     if ok:
         buf.tofile(str(path))
 
 
 def hex_to_rgb(s):
+    """'#RRGGBB' → (r, g, b)"""
     s = s.lstrip("#")
     return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
 
@@ -112,6 +126,7 @@ def classify(img, markers, tol, min_sat=70):
 
 
 def clean_mask(mask, open_px=3, close_px=5):
+    """先开（去掉孤立小点）后闭（补上小孔 / 细缝），核是椭圆"""
     k1 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_px, open_px))
     k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px, close_px))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k1)
@@ -119,7 +134,7 @@ def clean_mask(mask, open_px=3, close_px=5):
 
 
 def mask_to_rings(mask, min_area_px):
-    """返回 [(外环, [内环...])], 像素坐标 float ndarray(N,2)。"""
+    """掩膜 → [(外环, [内环...])]，OpenCV 轮廓（像素坐标）。小于 min_area_px 的外环丢掉，内环门槛减半"""
     cnts, hier = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
     out = []
     if hier is None:
@@ -139,6 +154,7 @@ def mask_to_rings(mask, min_area_px):
 
 
 def simplify_ring(cnt, eps):
+    """Douglas-Peucker 简化，返回 (N,2) float 数组；简化到不足 3 点返回 None"""
     a = cv2.approxPolyDP(cnt, eps, True).reshape(-1, 2).astype(np.float64)
     return a if len(a) >= 3 else None
 
@@ -159,11 +175,13 @@ def dominant_angle(rings):
 
 
 def ang_diff90(a, b):
+    """两个方向角在 90° 周期下的最小夹角（建筑主方向差 90° 视为同向）"""
     d = (a - b) % (math.pi / 2)
     return min(d, math.pi / 2 - d)
 
 
 def _line_intersect(p1, d1, p2, d2):
+    """两条直线（点 + 方向）的交点；平行返回 None"""
     cross = d1[0] * d2[1] - d1[1] * d2[0]
     if abs(cross) < 1e-9:
         return None
@@ -182,6 +200,7 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
     P = pts @ R.T
     n = len(P)
 
+    # 每条边归类: H 水平（c = y 坐标）、V 竖直（c = x 坐标）、F 自由斜边；L 长度，a/b 端点（旋转后坐标）
     edges = []  # dict(t='H'|'V'|'F', c, L, a, b)
     for i in range(n):
         a, b = P[i], P[(i + 1) % n]
@@ -200,6 +219,7 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
             edges.append(dict(t="F", c=None, L=L, a=a, b=b))
 
     def merge_pass(es):
+        """反复做两件事直到没变化: 抹掉同类边之间的小台阶；合并相邻同类边（错位大就插一条垂直连接边）"""
         changed = True
         while changed and len(es) > 3:
             changed = False
@@ -250,12 +270,14 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
         return None
 
     def as_line(e):
+        """边 → (直线上一点, 方向)"""
         if e["t"] == "H":
             return np.array([0.0, e["c"]]), np.array([1.0, 0.0])
         if e["t"] == "V":
             return np.array([e["c"], 0.0]), np.array([0.0, 1.0])
         return e["a"], e["b"] - e["a"]
 
+    # 相邻两边求交得到新顶点；交点飞太远（近乎平行的两条边）就退回原端点
     out = []
     m = len(edges)
     for i in range(m):
@@ -269,7 +291,7 @@ def orthogonalize(pts, ang, snap_deg=22.0, jog_tol=1.2):
 
 
 def ortho_building(poly_m, holes_m, ang, enable):
-    """直角化并校验，失败则回退到简化后的原轮廓。"""
+    """直角化并校验（面积对称差 ≤18% 才接受），失败则回退到原轮廓。返回 shapely Polygon"""
     src = Polygon(poly_m, holes_m)
     if not src.is_valid:
         src = src.buffer(0)
@@ -301,10 +323,11 @@ def ortho_building(poly_m, holes_m, ang, enable):
 # ----------------------------------------------------------------------------
 # 道路骨架 → 中心线图
 # ----------------------------------------------------------------------------
-N8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+N8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]  # 8 邻域 (dy, dx)
 
 
 def skeletonize_mask(mask):
+    """细化成单像素骨架: 优先 scikit-image，其次 opencv-contrib 的 thinning，都没有返回 None"""
     try:
         from skimage.morphology import skeletonize
         return skeletonize(mask > 0)
@@ -316,7 +339,11 @@ def skeletonize_mask(mask):
 
 
 def skeleton_graph(sk):
-    """骨架像素 → 图。返回 nodes{id:(x,y)}, edges[[a,b,pts(N,2 xy)]]"""
+    """
+    骨架像素 → 图。返回 nodes{id:(x,y)}, edges[[a,b,pts(N,2 xy)]]
+    节点 = 邻居数 ≠ 2 的骨架像素（端点、分叉点），相邻的节点像素聚成一个；边 = 从节点出发沿骨架走到下一个节点的像素串。
+    没有任何节点的闭环（孤立的环道）单独处理成自环边。
+    """
     H, W = sk.shape
     skp = np.pad(sk, 1).astype(np.uint8)
     nb = np.zeros_like(skp, dtype=np.int32)
@@ -337,6 +364,7 @@ def skeleton_graph(sk):
     direct = set()
 
     def walk(start_id, y0, x0, y1, x1):
+        """从节点 start_id 的邻居 (y1,x1) 出发沿骨架走，碰到别的节点就停。返回 (终点节点 id 或 None, 像素路径)"""
         path = [(x0 - 1, y0 - 1), (x1 - 1, y1 - 1)]
         py, px, cy, cx = y0, x0, y1, x1
         while True:
@@ -410,17 +438,23 @@ def skeleton_graph(sk):
 
 
 def poly_len(pts):
+    """折线长度"""
     return float(np.hypot(*np.diff(pts, axis=0).T).sum()) if len(pts) > 1 else 0.0
 
 
 def prune_and_merge(nodes, edges, dt):
-    """剪掉骨架毛刺，再把度为 2 的节点两侧的边拼起来。"""
+    """
+    剪掉骨架毛刺，再把度为 2 的节点两侧的边拼起来，并把挨得太近的路口合并。
+    dt 是道路掩膜的距离变换（每个像素到路边的距离），用来估路宽。返回 (edges, deg, width_of)
+    """
     def width_of(pts):
+        """一条边的路宽（像素）: 沿线距离变换的中位数 × 2"""
         ix = np.clip(pts[:, 0].round().astype(int), 0, dt.shape[1] - 1)
         iy = np.clip(pts[:, 1].round().astype(int), 0, dt.shape[0] - 1)
         return 2.0 * float(np.median(dt[iy, ix]))
 
     def max_width_of(pts):
+        """沿线最宽处（毛刺判断用）"""
         ix = np.clip(pts[:, 0].round().astype(int), 0, dt.shape[1] - 1)
         iy = np.clip(pts[:, 1].round().astype(int), 0, dt.shape[0] - 1)
         return 2.0 * float(dt[iy, ix].max())
@@ -530,6 +564,7 @@ def cut_polyline(pts, s0, s1):
 # 主流程
 # ----------------------------------------------------------------------------
 def geom_to_json(g, nd=2):
+    """shapely 几何 → [{polygon, holes}]（多部件拆开，面积 < 1㎡ 的丢掉），坐标保留 nd 位小数"""
     polys = [g] if isinstance(g, Polygon) else [p for p in getattr(g, "geoms", []) if isinstance(p, Polygon)]
     out = []
     for p in polys:
@@ -543,6 +578,7 @@ def geom_to_json(g, nd=2):
 
 
 def main():
+    # ---------------- 参数 ----------------
     ap = argparse.ArgumentParser(description="标记图 → scene.json", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("image", help="涂好标记色的地图图片 (png/jpg)")
     ap.add_argument("-o", "--out", default="scene.json")
@@ -568,6 +604,7 @@ def main():
     mpp = args.mpp or ((args.width_m or 300.0) / W)
     log(f"图片 {W}x{H}px, 比例 {mpp:.4f} m/px → {W * mpp:.0f}x{H * mpp:.0f} m")
 
+    # ---------------- 归类 → 每种标记一张掩膜 ----------------
     cls = classify(img, markers, args.tol, args.min_sat)
     px = lambda m_: max(1, int(round(m_ / mpp)))  # 米 → 像素
 
@@ -584,6 +621,7 @@ def main():
 
     # 点状标记先取质心，再把它们占的像素还给周围的面状图层（否则建筑边上会缺一口）
     def dots(idx_list):
+        """点状标记的连通域质心（像素）"""
         pts = []
         for i in idx_list:
             n, _, stats, cent = cv2.connectedComponentsWithStats(layer_mask[i], connectivity=8)
@@ -609,11 +647,13 @@ def main():
         dot_k = cv2.getStructuringElement(cv2.MORPH_RECT, (dot_size + 11, dot_size + 11))
 
     def area_mask(i):
+        """面状图层的干净掩膜: 去噪 + 补回被圆点盖住的像素"""
         m = clean_mask(layer_mask[i], 3, max(3, px(0.8) | 1))  # 先去噪点，否则闭运算会把碎点连成片
         if dot_size:
             m = m | (cv2.morphologyEx(m, cv2.MORPH_CLOSE, dot_k) & dot_mask)
         return m
 
+    # 像素 ↔ 米: 原点在图片中心
     cx, cy = W / 2.0, H / 2.0
     to_m = lambda p: (np.asarray(p, dtype=np.float64) - [cx, cy]) * mpp
     to_px = lambda p: np.asarray(p, dtype=np.float64) / mpp + [cx, cy]
@@ -636,6 +676,7 @@ def main():
     g_ang = dominant_angle([r[1] for r in raw]) if raw else 0.0
     log(f"建筑 {len(raw)} 栋, 全局主方向 {math.degrees(g_ang):.1f}°")
 
+    # 每栋楼: 自己的主方向（接近全局主方向就直接用全局的）→ 直角化 → 层数（写字楼按占地面积 6~28 层，住宅 9~18 层）
     buildings = []
     for k, (mk, shell, holes) in enumerate(raw):
         ang = dominant_angle([shell])
@@ -670,6 +711,7 @@ def main():
         near = cv2.dilate(emask, np.ones((9, 9), np.uint8))
         rmask |= cv2.morphologyEx(rmask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8)) & near
 
+    # 面状区域按优先级互斥: 先到先得，后面的类型只取还没被占的像素
     AREA_PRIORITY = ["water", "parking", "green", "park", "plaza"]
     area_masks = {}
     taken = bmask_all | rmask
@@ -683,6 +725,7 @@ def main():
             area_masks[kind] = clean_mask(m, max(3, px(1.0) | 1), 3)
             taken |= area_masks[kind]
 
+    # 地块范围: 所有标记内容的外包络（40m 闭运算把街区之间的缝合上），再外扩一圈人行边
     if args.site == "full":
         site_mask = np.full((H, W), 255, np.uint8)
     else:
@@ -703,6 +746,7 @@ def main():
             site_mask = cv2.dilate(site_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * mg + 1, 2 * mg + 1)))
 
     def mask_to_geom(mask, simp):
+        """掩膜 → 米制 shapely 几何（多个连通域并成一个 MultiPolygon），buffer(0) 修自交"""
         polys = []
         for shell, holes in mask_to_rings(mask, px(3) ** 2):
             p = Polygon(to_m(shell.reshape(-1, 2)), [to_m(h.reshape(-1, 2)) for h in holes if len(h) >= 3])
@@ -727,6 +771,7 @@ def main():
         if not g_.is_empty:
             areas[kind] = g_
     empty = Polygon()
+    # 可走区域 walk_free = 铺装 + 停车场 − 建筑 − 绿化带 − 水体，后面布门 / 出入口都要落在它里面
     # 水体和停车场在路面标高（从人行铺装里挖掉），绿化/公园/广场盖在铺装上面
     sunk = unary_union([areas.get("water", empty), areas.get("parking", empty)])
     pavement = site.difference(roads).difference(sunk)
@@ -740,6 +785,7 @@ def main():
         log("面状区域: " + ", ".join(f"{k} {v.area:.0f}㎡" for k, v in areas.items()))
 
     # ---------------- 环岛检测 ----------------
+    # 道路掩膜里的孔洞，够圆（圆度 > 0.72）、半径 3~28m、里面没有建筑 → 环岛的中心岛
     islands = []  # (中心 px, 内半径 px, 轮廓)
     if rmask.any():
         cnts, hier = cv2.findContours(rmask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -776,6 +822,7 @@ def main():
         #   1) 用各条路在路口范围之外的直线段求交（最小二乘），得到路口的真实中心；
         #   2) 把各条路的折线从路口范围边缘直接拉直接到这个中心。
         def dt_m(pos_):
+            """像素位置处的距离变换值（到路边的距离，像素）"""
             return float(dt[min(H - 1, max(0, int(round(pos_[1])))), min(W - 1, max(0, int(round(pos_[0]))))])
 
         ends = {}  # nid -> [(edge, end)]
@@ -843,6 +890,7 @@ def main():
         edge_w = [width_of(e[2]) * mpp for e in edges]
 
         def arm_dir(pts, at_start):
+            """这条边从某端出发的方向（取前 20 个点）"""
             q = pts if at_start else pts[::-1]
             k = min(len(q) - 1, 20)
             d = q[k] - q[0]
@@ -856,6 +904,7 @@ def main():
             incident.setdefault(b_, []).append((ei, arm_dir(pts_, False)))
 
         def box_extent(nid, ei):
+            """路口 nid 沿边 ei 方向的深度 = 与之相交的其他路的最大半宽（去掉自己的直行延续）"""
             arms = incident.get(nid, [])
             me = next((d for i, d in arms if i == ei), None)
             others = [(i, d) for i, d in arms if i != ei]
@@ -879,6 +928,7 @@ def main():
             inside = emask[iy, ix] > 0
             return round(float(np.median(edt_deck[iy, ix][inside])) * mpp, 2) if inside.mean() > 0.6 else 0.0
 
+        # 逐条边输出: roadGraph 的节点 / 边，车道线（截掉路口 + 斑马线），斑马线（路口进口道处 + 长路段中途）
         ring_nodes = set()
         for a, b, pts in edges:
             if ring_of(pts):
@@ -946,6 +996,7 @@ def main():
         log(f"道路中心线 {len(lanes)} 段, 斑马线 {len(crosswalks)} 处")
 
     # ---------------- 高架 ----------------
+    # 桥面多边形 + 自己的骨架图（节点 id 加 e 前缀，level=1）；不和地面路网相连，上下桥的匝道由前端按需生成
     elevated = Polygon()
     if emask.any():
         elevated = mask_to_geom(emask, 1.0).buffer(0.8, join_style=2).buffer(-0.8, join_style=2).simplify(0.6, preserve_topology=True)
@@ -999,6 +1050,7 @@ def main():
     doors = []
 
     def edge_normal_outward(poly, a, b):
+        """边 a→b 的单位法线，朝建筑外侧"""
         d = np.array(b) - np.array(a)
         n = np.array([d[1], -d[0]]) / max(np.hypot(*d), 1e-9)
         mid = (np.array(a) + np.array(b)) / 2
@@ -1007,6 +1059,7 @@ def main():
         return n
 
     def snap_door(p_m):
+        """手工点的门吸附到最近建筑的外墙上（15m 内），返回 {building, pos, normal}"""
         pt = Point(*p_m)
         best = min(buildings, key=lambda b: b["geom"].exterior.distance(pt))
         if best["geom"].exterior.distance(pt) > 15:
@@ -1025,6 +1078,7 @@ def main():
             doors.append(d)
         else:
             log(f"警告: 店门标记 {p.round()} 离任何建筑都超过 15m，已忽略")
+    # 没手工标门的楼自动布门: 场馆沿周长每 30m、写字楼 / 住宅最长的一两条临街边、商铺每条临街边按间距布
     marked = {d["building"] for d in doors}
     auto_n = 0
     for b in buildings:
@@ -1069,6 +1123,7 @@ def main():
     log(f"店门 {len(doors)} 个（手工标记 {len(doors) - auto_n}，自动 {auto_n}）")
 
     # ---------------- 人流出入口 ----------------
+    # 手工点吸附到可走区域；有核心区时沿核心区边界每 45m 一个（权重 0.5）；什么都没有就在地块四周放 8 个
     portals = []
     for p in portal_px:
         q = to_m(p)
@@ -1131,6 +1186,7 @@ def main():
 
 
 def write_debug(path, img, scene, to_px):
+    """把识别结果叠在灰化的原图上: 铺装、区域、高架、地块边界、车道线、斑马线、建筑、门、出入口、轨道线、核心区"""
     base = img[..., :3] if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     gray = cv2.cvtColor(cv2.cvtColor(base, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
     vis = cv2.addWeighted(gray, 0.35, np.full_like(gray, 255), 0.65, 0)
