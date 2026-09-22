@@ -66,6 +66,13 @@
 - map2scene: sidecar `roads` 按几何重合对到骨架边上，道路边和车道线带 `laneCount`，普通路也能单行
 - 前端 `laneLayout` 支持指定车道数，单行路不再限 2 条；三维页调试条加「编辑场景」入口
 
+### 场景编辑器第二版
+- 代码集中到 `editor/`（页面、前端、后端、测试、说明），旧地址 `/editor.html` 自动跳到 `/editor/`
+- 路口工具: 每个路口可以关灯、分别设东西 / 南北向绿灯时长、禁止左转；信号灯配时按路口计算（`makeTiming`），车流按 `noLeft` 选路
+- 重新生成时楼编号不变，场馆信息、实地标注的商户和吸引力、实测店门都保留；场馆可在编辑器里填名称 / 类型 / 容量
+- 打开已有场景时把被路口切开的路段接回整条；高架端点停在画布中间、路口设置对不上路口时给提醒
+- `editor/README.md` 写了生成流程和剩下的限制各自要考虑什么
+
 ### 实地标注工具（手机网页 `survey.html`）
 - 50 米网格分工，每格可标未查 / 进行中 / 已完成 / 待复核
 - 点楼新增商户，点外墙标门口（自动吸附、算朝外方向，可标多扇），墙上点两下取临街范围，填店名、业态、楼层、营业时间
@@ -96,7 +103,7 @@
 - 样例数据: `tools/fetch_samples.py` 下载 SpaceNet（CC BY-SA 4.0）场景并拼接，正方形像素（经纬度网格东西向要 ×cos 纬度）
 
 ### 测试
-- pytest 108 例、vitest 179 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
+- pytest 113 例、vitest 194 例（新增 satgeo、sat2marks 会话 / HTTP 路由、map2scene 端到端、osm、autoscene / roofnet / 导入服务）
 
 ## v0.2.0 — 2026-09-22　城区版
 
