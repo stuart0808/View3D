@@ -38,10 +38,12 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
   }
   if (slabs.length) {
     const slab = new THREE.Mesh(mergeGeometries(slabs), std(style.slab))
+    slab.name = 'slab'
     slab.castShadow = true // 底座的侧面投影到下面的阴影平面上，街区才像「浮」着
     slab.receiveShadow = true
     group.add(slab)
     const road = new THREE.Mesh(mergeGeometries(roadTops), std(style.road))
+    road.name = 'roadSurface' // 卫星底图打开时和铺装 / 区域 / 标线一起隐藏（见 CityEngine.setImagery）
     road.receiveShadow = true // 楼和树的影子落在路上
     group.add(road)
   }
@@ -53,6 +55,7 @@ export function buildGround(scene, style, parkingLines = [], railGaps = [], isla
     const mat = std(style.pavement, 0.9)
     mat.map = tileTexture(scene.angle || 0) // 分缝贴图按世界坐标平铺（ExtrudeGeometry 的 uv 就是 xy），跟随街区方向
     const pave = new THREE.Mesh(mergeGeometries(paves), mat)
+    pave.name = 'pavement'
     pave.receiveShadow = true
     group.add(pave)
   }
