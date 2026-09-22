@@ -4,12 +4,17 @@
 //   写字楼 block       玻璃幕墙塔楼（竖向肋 + 塔冠）/ 裙房 + 石材格窗 / 逐级收分的塔楼
 //   商业 shop          大商场（入口门头 + 屋顶采光天窗）/ 沿街小商铺（遮阳篷）；临街面都是橱窗 + 招牌
 //   场馆 venue         体育场 / 壳体剧院（见 buildVenue）
+//
+// 画法: 墙体 / 幕墙 / 屋面 / 草坪各自合并成一个大网格（顶点色），橱窗、招牌、壁柱这类小构件用三个 InstancedMesh 的单位盒子；
+// 每个顶点 / 实例带建筑编号 bid，室内视图靠它在着色器里隐藏单独一栋（见 hideable）。
+// 坐标: 二维 (x, y) 对应三维 (x, ·, z)，高度沿 y；toGround 负责把拉伸体从 xy 平面翻到地面上。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { signedArea, edgeNormal, offsetPolygon, roundPolygon, makeShape, toGround, interiorPoints, distToPolygonEdge } from './geometry.js'
 
-const CORNER_R = 1.6
-const FLOOR_H = { shop: 4.4, block: 4.0, residential: 3.1, venue: 4.4 }
+const CORNER_R = 1.6 // 平面轮廓的圆角半径 (m)
+/** 各类建筑的层高 (m)，楼高 = 层数 × 层高；人群模型算楼层用的也是它 */
+export const FLOOR_H = { shop: 4.4, block: 4.0, residential: 3.1, venue: 4.4 }
 
 /**
  * 室内视图要「单独隐藏某一栋楼」，但所有楼是合并成几个大网格画的。
@@ -18,6 +23,7 @@ const FLOOR_H = { shop: 4.4, block: 4.0, residential: 3.1, venue: 4.4 }
  */
 export const hiddenBuilding = { value: -1 }
 
+/** 给材质打「可隐藏」补丁（见上）。返回同一个材质，方便链式写 */
 export function hideable(material) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.hiddenBid = hiddenBuilding
@@ -27,11 +33,13 @@ export function hideable(material) {
   return material
 }
 
+/** 网格投影用的深度材质也要打补丁，不然被隐藏的楼还会在地上留个影子 */
 function withShadowHiding(mesh) {
   mesh.customDepthMaterial = hideable(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }))
   return mesh
 }
 
+/** 给几何体的每个顶点写上建筑编号 */
 function tag(geometry, bid) {
   geometry.setAttribute('bid', new THREE.BufferAttribute(new Float32Array(geometry.attributes.position.count).fill(bid), 1))
   return geometry
@@ -60,10 +68,20 @@ const OFFICE_GLASS = ['#7f9db8', '#6e8ea6', '#8aa7b5', '#5f7d94', '#93a9bd', '#7
 const OFFICE_STONE = ['#d8dade', '#cfd3d8', '#e0dcd4', '#c9ced4']
 const MALL_WALL = ['#e4e6e9', '#dcdfe3', '#e9e4dc', '#d9dde2']
 const MALL_ACCENT = ['#d2603a', '#2f6fd0', '#d59a2a', '#2f9c8f', '#b8456b']
-const AWNING = ['#c4553e', '#2f7d6b', '#d09a3a', '#4a6fa5', '#8c4a6e']
+const AWNING = ['#c4553e', '#2f7d6b', '#d09a3a', '#4a6fa5', '#8c4a6e'] // 小商铺遮阳篷
 
+/** 按编号从调色板里取色（负数也安全） */
 const pick = (arr, k) => arr[((k % arr.length) + arr.length) % arr.length]
 
+/**
+ * 把场景里所有建筑画出来。
+ * @param scene  scene.json（用 buildings[]: polygon / holes / kind / floors / venue / angle，以及 angle 街区主方向）
+ * @param nav    导航网格，只用来判断商铺哪面临街（contains / isWalkable）
+ * @param rand   确定性随机数
+ * @param style  { roof } 屋面底色
+ * @returns { group, heatGeometry }  heatGeometry 是所有屋顶热力层合并后的几何体（heat.js 用它做热力图），可能为 null
+ * 每栋楼的「原型」由 seed = 编号 × 7 + 层数 决定，所以同一个场景每次打开长得一样。
+ */
 export function buildBuildings(scene, nav, rand, style) {
   const group = new THREE.Group()
   group.name = 'buildings'
@@ -84,6 +102,7 @@ export function buildBuildings(scene, nav, rand, style) {
     Object.values(I).forEach((list, k) => { for (let i = imark[k]; i < list.length; i++) list[i].bid = bid })
   })
 
+  // 一组几何体合并成一个网格挂到 group 上；屋面要保留 uv（贴分缝图），其他都去掉 uv 以便和无 uv 的几何体合并
   const addMerged = (geos, material, name, { cast = true, keepUV = false } = {}) => {
     if (!geos.length) return null
     const mesh = withShadowHiding(new THREE.Mesh(mergeGeometries(keepUV ? geos : geos.map(stripUV), false), material))
@@ -204,6 +223,10 @@ function roofProps(ctx, b, poly, y, color) {
 // ---------------------------------------------------------------------------
 // 住宅
 // ---------------------------------------------------------------------------
+/**
+ * 住宅楼。三种原型: slab 板楼、penthouse 顶上两层内缩的退台楼、point 点式楼。
+ * 底层 3.4m 是深色基座；长边（长度 > 最长边 60%）当正立面，一面出阳台、另一面出楼梯间竖条，短边只开一列小窗。
+ */
 function buildResidential(b, ctx) {
   const { L, I, seed } = ctx
   const fh = FLOOR_H.residential, floors = b.floors || 11, holes = b.holes || []
@@ -251,6 +274,7 @@ function buildResidential(b, ctx) {
 // ---------------------------------------------------------------------------
 // 写字楼
 // ---------------------------------------------------------------------------
+/** 写字楼。三种原型: curtain 玻璃幕墙塔楼、stepped 逐级收分、grid 裙房 + 石材格窗 */
 function buildOffice(b, ctx) {
   const { L, I, seed } = ctx
   const fh = FLOOR_H.block, floors = b.floors || 8, holes = b.holes || []
@@ -316,6 +340,10 @@ function buildOffice(b, ctx) {
 // ---------------------------------------------------------------------------
 // 商业
 // ---------------------------------------------------------------------------
+/**
+ * 商业。面积 > 2200㎡ 算商场（入口门头 + 屋顶天窗 + 檐下品牌色带），否则是沿街小商铺（每个开间一个遮阳篷）。
+ * 临街判断: 边中点外 2.5m 或 4m 是人行道就算临街，临街面按 6m 一个开间排橱窗 + 招牌，连续 1~3 个开间共用一个配色。
+ */
 function buildShop(b, ctx) {
   const { L, I, nav, rand, seed } = ctx
   const fh = FLOOR_H.shop, floors = b.floors || 2, holes = b.holes || []
@@ -425,15 +453,21 @@ function buildVenue(b, ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// 收尾
+// ---------------------------------------------------------------------------
+/** 去掉 uv 属性，几何体才能和没有 uv 的合并 */
 function stripUV(g) {
   g.deleteAttribute('uv')
   return g
 }
 
+/** 屋面分缝贴图: 128px 的白底方框，按 9m 一格平铺。没有 canvas（测试环境）时返回 null */
 function roofTexture(angle) {
+  if (typeof document === 'undefined') return null
   const cv = document.createElement('canvas')
   cv.width = cv.height = 128
   const c2 = cv.getContext('2d')
+  if (!c2) return null
   c2.fillStyle = '#fff'
   c2.fillRect(0, 0, 128, 128)
   c2.strokeStyle = 'rgba(120,128,138,0.55)'
@@ -448,6 +482,7 @@ function roofTexture(angle) {
   return tex
 }
 
+/** 一批 {pos, quat, scale, color, bid} 变成一个单位盒子的 InstancedMesh；空列表也建一个 count=0 的网格，省得外面判空 */
 function instancedBoxes(items, material, name, castShadow) {
   const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, Math.max(1, items.length))
   mesh.name = name
