@@ -13,6 +13,7 @@ sat_server.py —— 前端「导入卫星图」的后端。只监听本机，�
     GET  /api/survey?scene=<场景 id>          实地标注数据（没有就给空白的）
     PUT  /api/survey?scene=<场景 id>          请求体 = 手机上的标注数据 JSON；和服务器上的合并后存盘，返回合并结果
     POST /api/survey/apply?scene=<场景 id>    把标注写回场景，另存为 imported/<名字>-surveyed，返回 {scene}
+    POST /api/draw/build?name=<名字>          请求体 = 场景编辑器画的矢量图 JSON；生成 imported/<名字>，返回 {scene, summary}
     GET  /api/scenes       已导入的场景 [{id, name, created, summary}]（同时写一份 public/scenes/imported/index.json，
                            服务没开时前端读这个静态文件也能列出来）
 处理在一个后台线程里按顺序做（CPU 上一张图几十秒到几分钟，并行只会更慢）。
@@ -34,11 +35,13 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoscene  # noqa: E402
 import survey as sv_survey  # noqa: E402
+import drawscene  # noqa: E402
 
 OUT = HERE.parent / "public" / "scenes" / "imported"  # vite 直接把 public/ 当静态目录，前端用 /scenes/imported/<name>.json 取
 SCENES = HERE.parent / "public" / "scenes"  # 所有场景（内置的在这层，导入的在 imported/ 下）
 SURVEY_DIR = HERE.parent / "data" / "survey"  # 实地标注数据: 不放 public/，店名等信息不直接当静态文件发出去
 SCENE_ID = re.compile(r"(imported/)?[A-Za-z0-9_\-]{1,60}")  # 场景 id 白名单: 防 ../ 跑出目录
+draw_lock = threading.Lock()  # 生成场景要跑 map2scene 子进程: 同一时间只跑一个，免得两次生成同名场景互相覆盖一半
 survey_lock = threading.Lock()  # 几台手机同时同步: 读-合并-写 要整体串行，否则后写的会盖掉先写的
 MAX_BYTES = 200 * 1024 * 1024  # 上传上限 200MB（大 GeoTIFF）
 jobs = {}  # job id → 状态 dict
@@ -57,8 +60,8 @@ def write_index():
     """
     items = []
     for f in OUT.glob("*.json"):
-        # index.json 自己、层数等 *_sidecar.json 附属文件都不是场景，跳过
-        if f.name == "index.json" or f.stem.endswith("_sidecar"):
+        # index.json 自己、层数等 *_sidecar.json、编辑器矢量图 *_drawing.json 都不是场景，跳过
+        if f.name == "index.json" or f.stem.endswith(("_sidecar", "_drawing")):
             continue
         try:
             s = json.loads(f.read_text("utf-8"))
@@ -209,6 +212,16 @@ def apply_survey(scene):
     return f"imported/{name}"
 
 
+def build_drawing(name, drawing):
+    """场景编辑器的矢量图 → imported/<名字>.json（同名覆盖，方便反复改了再生成），返回 (场景 id, 摘要)"""
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,60}", name or ""):
+        raise ValueError("场景名只能用字母、数字、下划线、横线（最长 60）")
+    with draw_lock:
+        summary = drawscene.build(drawing, OUT / f"{name}.json", work_dir=OUT / "_work")
+    write_index()
+    return f"imported/{name}", summary
+
+
 class Handler(BaseHTTPRequestHandler):
     """/api/* 路由；其余 404"""
 
@@ -276,6 +289,15 @@ class Handler(BaseHTTPRequestHandler):
         """POST /api/import: 请求体是图片本身，参数全在查询串里；立即返回 job id，不等处理完
         POST /api/survey/apply?scene=: 把标注写回场景"""
         u = urllib.parse.urlparse(self.path)
+        if u.path == "/api/draw/build":
+            try:
+                body = self._json_body(limit=80 * 1024 * 1024)  # 可能带 base64 底图，放宽到 80MB
+                sid, summary = build_drawing(urllib.parse.parse_qs(u.query).get("name", [""])[0], body)
+                return self._send({"scene": sid, "summary": summary})
+            except ValueError as e:
+                return self._send({"error": str(e)}, 400)
+            except RuntimeError as e:  # map2scene 失败: 日志末尾给前端看
+                return self._send({"error": str(e)}, 500)
         if u.path == "/api/survey/apply":
             try:
                 return self._send({"scene": apply_survey(self._scene())})
